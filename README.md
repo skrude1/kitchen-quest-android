@@ -1,26 +1,16 @@
-# Kitchen Quest — Android
+# Kitchen Quest (Android)
 
-Kitchen Quest: BBQ kitchen arcade prototype (dishwasher → cook helper career) wrapped in a WebView.
+BBQ-kitchen arcade game shipped as a WebView app. The game is a single file:
+`app/src/main/assets/index.html`.
 
-## Build (GitHub Actions — easiest)
+## Build the APK (GitHub Actions)
+1. Push this folder to the `main` branch of `skrude1/kitchen-quest-android`.
+2. The "Build Android APK" workflow runs on every push (or trigger it manually).
+3. Download the `kitchen-quest-debug-apk` artifact from the run page.
 
-1. Create an empty GitHub repo (no README).
-2. On the repo page click **Add file → Upload files**, then drag the *contents* of this folder (including the `.github` folder) into the browser window — subfolders upload automatically.
-3. Commit. The Actions workflow (`.github/workflows/build-apk.yml`) builds automatically and publishes the APK as the `kitchen-quest-debug-apk` artifact.
-4. Go to the repo's **Actions** tab → latest run → download **kitchen-quest-debug-apk** → unzip → `app-debug.apk`.
+## Build locally (Android Studio)
+Open this folder as a project, then Build > Build APK(s).
 
-## Install on your phone
-
-1. Copy `app-debug.apk` to your phone and open it.
-2. Allow "Install unknown apps" for your browser/file manager when prompted.
-3. Landscape game; touch controls are drawn in-canvas below the kitchen area. Back button quits a shift / exits the app.
-
-## Build locally (alternative)
-
-Open this folder in Android Studio → Build → Build APK(s), or run `gradle assembleDebug` with the Android SDK installed.
-
-## Structure
-
-- `app/src/main/assets/index.html` — the full game (extracted from the Vibe canvas)
-- `app/src/main/java/com/quint/kitchenquest/MainActivity.java` — fullscreen WebView wrapper; career progression persists via localStorage
-- No external dependencies; minSdk 21; appId `com.quint.kitchenquest`.
+## Update the game
+Replace `app/src/main/assets/index.html` with the newest version and rebuild.
+Everything else (career saves, back button, exit bridge) lives in `MainActivity.java`.
