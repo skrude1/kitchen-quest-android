@@ -1,0 +1,1620 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"/>
+<title>Kitchen Quest — Overworld Demo</title>
+<style>
+html,body{margin:0;background:#07070f;height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:manipulation}
+canvas{image-rendering:pixelated;image-rendering:crisp-edges;background:#0f0f23;border:4px solid #2a2a4a;box-shadow:0 0 60px #000c}
+</style>
+</head>
+<body>
+<canvas id="cv" width="1024" height="704"></canvas>
+<script>
+"use strict";
+// ============ KITCHEN QUEST — OVERWORLD DEMO ============
+// Prototype 3: cramped kitchen, moving NPCs (solid), playable dish pit.
+const RES=2;
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+ctx.imageSmoothingEnabled=false;
+ctx.scale(RES,RES);
+function fit(){const s=Math.max(1,Math.min((window.innerWidth-24)/512,(window.innerHeight-24)/352));cv.style.width=(512*s)+'px';cv.style.height=(352*s)+'px';}
+fit();
+window.addEventListener('resize',fit);
+
+const C={bg:'#0f0f23',panel:'#1a1a2e',line:'#2a2a4a',gold:'#ffd541',red:'#e76e55',grn:'#63c74d',blu:'#587ccc',wht:'#f4f4f4',gry:'#8b8ba7',org:'#fe9c4d',drk:'#111120'};
+function R(x,y,w,h,c){ctx.fillStyle=c;ctx.fillRect(x|0,y|0,Math.max(0,w|0),Math.max(0,h|0));}
+function T(s,x,y,c,sz){ctx.fillStyle=c||C.wht;ctx.font=(sz||9)+'px monospace';ctx.textBaseline='top';ctx.fillText(s,x|0,y|0);}
+function bar(x,y,w,h,pct,fg,bg){R(x,y,w,h,bg||C.line);R(x,y,w*Math.max(0,Math.min(1,pct)),h,fg);}
+
+// ---- input ----
+const down={},just={};
+function pressKey(k){k=(''+k).toLowerCase();
+  if(paused){paused=false;for(var pk in just)just[pk]=false;} // the waking input is swallowed
+  if(!down[k])just[k]=true;down[k]=true;}
+function releaseKey(k){down[(''+k).toLowerCase()]=false;}
+function tapKey(k){pressKey(k);releaseKey(k);} // canvas taps: fire the just-pulse, never leave the key held
+window.addEventListener('keydown',function(e){
+  var k=e.key.toLowerCase();
+  pressKey(k);
+  if(k===' '||k.indexOf('arrow')===0)e.preventDefault();
+});
+window.addEventListener('keyup',function(e){releaseKey(e.key);});
+
+// ---- touch controls: virtual keys drawn INTO the canvas ----
+// DOM overlay buttons can get their taps swallowed by embedded viewers, so the
+// d-pad and action buttons are rendered on the canvas and fed by canvas touch
+// events - the exact same pressKey/releaseKey path as the keyboard.
+var TOUCH=(typeof navigator!=='undefined')&&(('ontouchstart'in window)||navigator.maxTouchPoints>0);
+var TBTN=[]; // virtual buttons in game-coordinate rects (512x352), shown on touch devices
+function mkT(k,x,y,w,h,label){TBTN.push({k:k,x:x,y:y,w:w,h:h,label:label,on:false});}
+if(TOUCH){
+  // d-pad, lower-left - tucked below the kitchen map (map ends at y=174)
+  mkT('arrowup',26,182,36,36,'▲');
+  mkT('arrowleft',2,222,36,36,'◀');
+  mkT('arrowright',54,222,36,36,'▶');
+  mkT('arrowdown',26,262,36,36,'▼');
+  // action cluster, lower-right - over the message box band, never over the stations
+  mkT('d',330,182,48,40,'D');
+  mkT('n',382,182,48,40,'N');
+  mkT('r',330,226,48,40,'R');
+  mkT('enter',382,226,124,40,'BACK'); // function button 1 of 2, opposite the d-pad: back out of a station
+  mkT('s',330,270,48,62,'S');
+  mkT(' ',382,270,124,62,'SPACE'); // function button 2 of 2, opposite the d-pad: work/confirm (hold for slow jobs)
+  mkT('q',104,182,68,20,'QUIT (Q)'); // abandon the shift, back to the menu
+}
+function drawTouchUI(){ // drawn last so the virtual keys sit over the world and message box
+  for(var i=0;i<TBTN.length;i++){var b=TBTN[i];
+    R(b.x,b.y,b.w,b.h,b.on?'#ffd541':'rgba(26,26,46,0.72)');
+    R(b.x,b.y,b.w,2,'#6a5a3a');R(b.x,b.y+b.h-2,b.w,2,'#6a5a3a');R(b.x,b.y,2,b.h,'#6a5a3a');R(b.x+b.w-2,b.y,2,b.h,'#6a5a3a');
+    var fs=b.label.length>2?10:16;
+    T(b.label,b.x+b.w/2-b.label.length*fs*0.3,b.y+b.h/2-fs/2,b.on?'#1a1a2e':'#ffd541',fs);
+  }
+}
+function unlockAudio(){try{ // iOS/Android: audio must start inside a user gesture
+  AC=AC||new (window.AudioContext||window.webkitAudioContext)();
+  if(AC.state==='suspended')AC.resume();
+}catch(err){}}
+if(TOUCH&&cv.addEventListener){
+  var tpos=function(t){var r=cv.getBoundingClientRect();return {x:(t.clientX-r.left)/r.width*512,y:(t.clientY-r.top)/r.height*352};};
+  var hitBtn=function(p){for(var i=0;i<TBTN.length;i++){var b=TBTN[i];if(p.x>=b.x&&p.x<b.x+b.w&&p.y>=b.y&&p.y<b.y+b.h)return b;}return null;};
+  var touchHeld=function(e){ // recompute every virtual key from ALL active touches (multi-touch + slide)
+    e.preventDefault();
+    var held={},i;
+    for(i=0;i<e.touches.length;i++){var b=hitBtn(tpos(e.touches[i]));if(b)held[b.k]=true;}
+    for(i=0;i<TBTN.length;i++){var v=TBTN[i];
+      if(held[v.k]){if(!down[v.k])pressKey(v.k);v.on=true;}
+      else{if(down[v.k]&&!(overlayTap&&v.k===' '))releaseKey(v.k);v.on=false;}
+    }
+  };
+  cv.addEventListener('touchstart',function(e){
+    unlockAudio();
+    if(scene==='menu'){
+      e.preventDefault();
+      var p=tpos(e.changedTouches[0]);
+      if(p.x>=402&&p.x<=508&&p.y>=126&&p.y<=142)tapKey('u'); // dev unlock chip
+      else if(p.y>=146&&p.y<=222){ // the two role cards
+        if(p.x>=40&&p.x<=248)tapKey('1');
+        else if(p.x>=264&&p.x<=472)tapKey('2');
+      }else tapKey('enter'); // tap elsewhere = clock in with the selected role
+    }else if(scene==='ready'){e.preventDefault();tapKey(' ');} // tap anywhere to start
+    else if(scene==='end'){e.preventDefault();tapKey('enter');} // tap anywhere to continue
+    else{ // play scene: buttons own their taps - every other tap walks the cook or works the station
+      e.preventDefault();
+      touchHeld(e);
+      for(var ci=0;ci<e.changedTouches.length;ci++){var pp=tpos(e.changedTouches[ci]);if(!hitBtn(pp))playTap(pp);}
+    }
+  },{passive:false});
+  cv.addEventListener('touchmove',touchHeld,{passive:false});
+  cv.addEventListener('touchend',touchEndHeld,{passive:false});
+  cv.addEventListener('touchcancel',touchEndHeld,{passive:false});
+}
+
+// ---- pointer taps: click or tap the world to walk there and work it (mouse + touch, one path) ----
+var walkTarget=null,walkThen=null,walkFace=null,walkStuck=0;
+function pointerGamePos(cx,cy){var r=cv.getBoundingClientRect();return {x:(cx-r.left)/r.width*512,y:(cy-r.top)/r.height*352};}
+function walkableTile(txx,tyy){return tile(txx,tyy)==='.';}
+function faceToward(fx,fy){var adx=Math.abs(fx-P.x),ady=Math.abs(fy-P.y);P.dir=adx>ady?(fx<P.x?'left':'right'):(fy<P.y?'up':'down');}
+var overlayTap=false; // a tap inside a station overlay can be HELD (clog/load/stir need press-and-hold)
+function touchEndHeld(e){ // last finger up: also drop any held overlay tap
+  touchHeld(e);
+  if(e.touches.length===0&&overlayTap){releaseKey(' ');overlayTap=false;}
+}
+function playTap(p){
+  if(paused){paused=false;return;} // any tap wakes a paused shift
+  if(overlay){pressKey(' ');overlayTap=true;return;} // station overlays: tap-and-HOLD anywhere = the primary action (scrub/load/unclog)
+  var txx=Math.floor(p.x/16),tyy=Math.floor((p.y-MAP_Y)/16);
+  if(tyy<0||tyy>=MAP.length)return;
+  var best=null,bd=1e9;
+  for(var i=0;i<NPCS.length;i++){var n=NPCS[i];if(n.away||(n.ghost&&n.y<96))continue;
+    var d2=(p.x-n.x)*(p.x-n.x)+(p.y-n.y)*(p.y-n.y);if(d2<bd){bd=d2;best=n;}}
+  if(best&&bd<14*14){ // tapped a person: walk up and face them (interact = talk)
+    walkTarget={x:best.x,y:best.y,thr:14};walkThen='interact';walkFace={x:best.x,y:best.y};walkStuck=0;return;
+  }
+  if(!walkableTile(txx,tyy)){ // tapped a station/counter: stand in FRONT of it (the hallway tile below), face it, work it
+    var dirs=[[0,1],[-1,1],[1,1],[0,-1],[-1,0],[1,0],[0,2],[2,0],[0,-2],[-2,0]],pick=null;
+    for(var dj=0;dj<dirs.length&&!pick;dj++){var ax=txx+dirs[dj][0],ay=tyy+dirs[dj][1];
+      if(walkableTile(ax,ay))pick={x:ax*16+8,y:MAP_Y+ay*16+8};}
+    if(!pick)return;
+    if(!pick)return;
+    walkTarget={x:pick.x,y:pick.y,thr:6};walkThen='interact';walkFace={x:txx*16+8,y:MAP_Y+tyy*16+8};walkStuck=0;return; // snap tight: land centered in front of the station
+  }
+  walkTarget={x:txx*16+8,y:MAP_Y+tyy*16+8,thr:14};walkThen=null;walkFace=null;walkStuck=0; // free walk to the tapped floor
+}
+if(cv.addEventListener&&!TOUCH){ // desktop mouse: click the menu cards, click the world to walk and work
+  cv.addEventListener('mousedown',function(e){
+    var p=pointerGamePos(e.clientX,e.clientY);
+    if(scene==='menu'){
+      if(p.x>=402&&p.x<=508&&p.y>=126&&p.y<=142)tapKey('u'); // dev unlock chip
+      else if(p.y>=146&&p.y<=222){if(p.x>=40&&p.x<=248)tapKey('1');else if(p.x>=264&&p.x<=472)tapKey('2');}
+      else tapKey('enter');
+    }else if(scene==='ready')tapKey(' ');
+    else if(scene==='end')tapKey('enter');
+    else playTap(p);
+  });
+  cv.addEventListener('mouseup',function(){if(overlayTap){releaseKey(' ');overlayTap=false;}}); // desktop hold: click-and-hold in overlays
+  cv.addEventListener('mouseleave',function(){if(overlayTap){releaseKey(' ');overlayTap=false;}});
+  cv.addEventListener('contextmenu',function(e){ // RIGHT CLICK = back out of the station overlay
+    e.preventDefault();
+    if(overlayTap){releaseKey(' ');overlayTap=false;}
+    if(scene==='play'&&overlay){overlay=null;sfxTick();}
+  });
+}
+
+// ---- audio ----
+var AC=null;
+function beep(f,d,ty){try{
+  AC=AC||new (window.AudioContext||window.webkitAudioContext)();
+  var o=AC.createOscillator(),g=AC.createGain();
+  o.type=ty||'square';o.frequency.value=f;o.connect(g);g.connect(AC.destination);
+  g.gain.setValueAtTime(0.05,AC.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001,AC.currentTime+(d||0.08));
+  o.start();o.stop(AC.currentTime+(d||0.08));
+}catch(err){}}
+function sfxGood(){beep(660,0.07);beep(880,0.09);}
+function sfxBad(){beep(160,0.18,'sawtooth');}
+function sfxTick(){beep(520,0.04);}
+
+// ---- pixel sprites ----
+var PAL={w:'#f0f0f0',W:'#dfe6ef',s:'#8b8ba7',k:'#22223a',d:'#5a6a44',b:'#c9a06a',B:'#8a5a2a',r:'#c05040',R:'#7a2818',y:'#ffd541',o:'#fe9c4d',g:'#63c74d',n:'#d4954a',t:'#7ac0a0',p:'#e8dcc0',z:'#587ccc'};
+function spr(s,x,y,sc){
+  sc=sc||1;
+  for(var rr=0;rr<s.length;rr++){var row=s[rr];
+    for(var cc=0;cc<row.length;cc++){var ch=row[cc];
+      if(ch!=='.'){ctx.fillStyle=PAL[ch]||'#fff';ctx.fillRect(x+cc*sc,y+rr*sc,sc,sc);}
+    }
+  }
+}
+// ---- real tile art: "Kitchen Assets for #LetsCookJam" by Bluerobin2 (OpenGameArt, CC-BY 3.0) ----
+// 12x24 top-down sprites: sink, stove, fridge, wood counter, knife counter. Blitted at 2px inset,
+// rising 8px above their tile row for depth (per the set's README). All mechanics unchanged.
+var TILE_SP={
+ct:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAYCAYAAADOMhxqAAAAu0lEQVR42u2QSw7CMAxEc6fegQukznfBFvpLKafgFBzVdFw1Ugqb7BDC0rRpnTfjRKl/fUW5ybGfPYdb4LhEeePbjvajFB6AdgCikdin1WQObJPdTJIvAbhSTyIzGJGdrADxHjd4ByAAANuuzYAZTV6j95YgsasrUvRVM3UkBvhXANi8zy9n6LeNgPRFy9olJ0l5pOIcAxVjSW9NR18dry0sIV/tcX4Z6WRPXCP1ODdcI/XsG67RTwC19QIlm4A/tkBzmQAAAABJRU5ErkJggg==',
+sink:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAYCAYAAADOMhxqAAAAkUlEQVR42mNgGAVkAiMjo/8gTLQGJSUl3Ioj8iL+RxZE/o8qjAKbCqJBGsJzw8F8EI0MGUBES0sLGIMUYqNhGEXDwdOX8GLKNTx48ACOT506BcbIYng1YMMgNWE5YaieJoRBocmAHmxRRVHgoAVJgkwEYVDQw4PVLdztPymYoTPe+D8pmGF+tvF/UvCw0EAqAAAxabehKkSUbgAAAABJRU5ErkJggg==',
+stove:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAYCAYAAADOMhxqAAAAYElEQVR42mNgGIngwYMH/0nBDAdPX/pPCgZraGlp+Y9M962aBMbY5Ei3gWQ/wBggK2EYnxj5Goayk8iOaWIwigYjI6P/SkpKOGnKNYAE8WGsNuDDGBpI8vSq7QeJwiC1AP3RpBPYvL4ZAAAAAElFTkSuQmCC',
+fridge:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAYCAYAAADOMhxqAAAAZUlEQVR42mN48ODBf1Iww6gGYjQcPH2JaMUgtWANpGDyNdy6UwvGuBROmDABt4abRavBGFlDS0sLbieRrAEbXrX9IJmehukk1hYGGIMYTFk8oCcBgvFASANGsJKsgXbxAAKkKAYASJ/Sagg3rpIAAAAASUVORK5CYII=',
+knife:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAYCAYAAADOMhxqAAAA9ElEQVR42t2TQRKCMAxFexZuIN6BC0AplIVbBRHFU3gKz+LSlUeK/GBris4oLs3MJ6HpS9IOKPWwc7OkaSzXAovjmE6rJcHLWK5BHoiiiL6RbLK4XG8EuVh6oacJQEnv4ncmqyy+AT4V+dGKXUHlviR7sFT1FXu8m9a8lcIDkAMg3Woqu6HI3pLpzFikK0MAVXWjWfk2Z5mdYaA6ViPsAAgAwKzOPJC3uY+Re+nAbYeq6JJuUtK15gJYCwBsdvPzGZpxI6B0nXJcdAV38iMF59jqYCzODd2RV9Nrs731Vzudn0dKTEJzpPDNzxH/VXP0F8BcuwMlLs0pXK9newAAAABJRU5ErkJggg=='};
+var TILE_IMG={};
+if(typeof Image!=='undefined'){for(var tsk in TILE_SP){TILE_IMG[tsk]=new Image();TILE_IMG[tsk].src=TILE_SP[tsk];}}
+function blit(n,x,y){var im=TILE_IMG[n];if(im&&im.complete&&im.width)ctx.drawImage(im,x|0,y|0);}
+var SP_PLATE=[
+'..wwwwwwwwww..',
+'.wWWWWWWWWWWw.',
+'wWWWWWWWWWWWWw',
+'wWWWWWWWWWWWWw',
+'.wWWWWWWWWWWw.',
+'..wwwwwwwwww..'];
+var SP_CHICK=[
+'..bbbb..',
+'.bbbbbb.',
+'bbbbbbbb',
+'bBbbbbBb',
+'bbbbbbbb',
+'bbbbbbbb',
+'.bbbbbb.',
+'..b..b..'];
+var SP_RIB=[
+'WWrrrrrrrrrrrrWW',
+'WrrrrrrrrrrrrrrW',
+'WrrrrRRrrRRrrrrW',
+'WrrrrrrrrrrrrrrW',
+'WrrRRrrrrrrRRrrW',
+'WrrrrrrrrrrrrrrW',
+'WWrrrrrrrrrrrrWW'];
+var SP_POT=[
+'..kkkkkkkkkk..',
+'.kWWWWWWWWWWk.',
+'kWWWWWWWWWWWWk',
+'kWWWWWWWWWWWWk',
+'kWWWWWWWWWWWWk',
+'kWWWWWWWWWWWWk',
+'kWWWWWWWWWWWWk',
+'.kWWWWWWWWWWk.',
+'..kkkkkkkkkk..'];
+var SP_PAN=[
+'..........kkk...',
+'.kkkkkkkkkkkkkk.',
+'k..............k',
+'k..............k',
+'k..............k',
+'.kkkkkkkkkkkkkk.',
+'..kk........kk..'];
+var SP_FISH=[
+'..WWWWWWWWWW.y..',
+'.WWWWWWWWWWWWyy.',
+'WWkWWWWWWWWWWyy.',
+'.WWWWWWWWWWWWyy.',
+'..WWWWWWWWWW.y..'];
+var SP_STEAK=[
+'.kkkkkkkkkkkk.',
+'kBBBBBBBBBBBBk',
+'kBBbbbbbBBBBBk',
+'kBBbbbbbbbBBBk',
+'kBBbbbbbBBBBBk',
+'kBBBBBBBBBBBBk',
+'.kkkkkkkkkkkk.'];
+var SP_COOK_D=[
+'..wwww..',
+'..pppp..',
+'.pk..kp.',
+'..pppp..',
+'.nWWWWn.',
+'.nWWWWn.',
+'..nnnn..',
+'..n..n..'];
+var SP_COOK_U=[
+'..wwww..',
+'..nnnn..',
+'..nnnn..',
+'..nnnn..',
+'.nWWWWn.',
+'.nWWWWn.',
+'..nnnn..',
+'..n..n..'];
+var SP_COOK_S=[
+'..wwww..',
+'...ppp..',
+'...pkp..',
+'...ppp..',
+'..nWWWn.',
+'..nWWWn.',
+'..nnnn..',
+'..n..n..'];
+var SP_AKM=[
+'..wwww..',
+'..pppp..',
+'.pk..kp.',
+'..pppp..',
+'..BBBB..',
+'.BBBBBB.',
+'..BBBB..',
+'..B..B..'];
+var SP_HELPER=[ // cook helper: green apron
+'..wwww..',
+'..pppp..',
+'.pk..kp.',
+'..pppp..',
+'..gggg..',
+'.gggggg.',
+'..gggg..',
+'..g..g..'];
+var SP_CHEF=[ // the cook: red apron
+'..wwww..',
+'..pppp..',
+'.pk..kp.',
+'..pppp..',
+'..rrrr..',
+'.rrrrrr.',
+'..rrrr..',
+'..r..r..'];
+var SP_DISH=[ // the dishwasher: blue apron
+'..wwww..',
+'..pppp..',
+'.pk..kp.',
+'..pppp..',
+'..zzzz..',
+'.zzzzzz.',
+'..zzzz..',
+'..z..z..'];
+
+// ---- the cramped kitchen (32 x 9 tiles of 16px) ----
+var MAP_Y=30;
+var MAP=[
+'################################', // 0
+'#####g..r..w..i..p............#', // 1 hot line, COMPACT: every helper station 3 steps apart - no more cross-kitchen sprints
+'#..............................#', // 2 the line hallway
+'#####t....h....f....k..........#', // 3 hot line front: tub, chop, fryer, grill 2
+'#..............................#', // 4 the working hallway
+'#..d..c..x..............a..q..u#', // 5 the pit row + the cold side (salad bar, fridge, drinks)
+'#..............................#', // 6 the pit hallway
+'#..............................#', // 7
+'########b#######################'  // 8 back door (dumpster)
+];
+var STATION_INFO={
+  g:{name:'RIB GRILL',line:'9-12 slabs on a live fire. Flip every few minutes or they burn. (Playable in the full game.)'},
+  r:{name:'ROTIS',line:'8 skewer slots, whole birds, 3 each. The helper rotates and counts from here.'},
+  w:{name:'WARMER',line:'Where cooked birds wait - and where running counts are called from. (Full game.)'},
+  i:{name:'RICE',line:'Red, Jamaican, white. Stir or they burn. (Playable in the full game.)'},
+  p:{name:'PANS',line:'Mango ribs, kadu, oxtail. Par levels. (Playable in the full game.)'},
+  h:{name:'CHOP',line:'The chop. The cook breaks down chicken and ribs right here - and the discard tub sits just left of it.'},
+  f:{name:'FRYER',line:'The deep fryer. Fried chicken in baskets. (Playable in the full game.)'},
+  k:{name:'GRILL 2',line:'The second grill: fish, short ribs, steak. To-order items. (Full game.)'},
+  a:{name:'SALAD BAR',line:'The cold side: salads built to order - grilled chicken, house, caesar. (AKM level.)'},
+  q:{name:'FRIDGE',line:'The cold station fridge. Dressings, toppings, backups on rail. (AKM level.)'},
+  u:{name:'DRINKS',line:'The drink fountain. Sweet tea, fruit punch, water, ice. (AKM level.)'},
+  d:{name:'DISH',line:''},
+  t:{name:'TUB',line:''},
+  c:{name:'RACK',line:'The clean rack. Dishes you finish go here.'},
+  x:{name:'TRASH',line:'The trash can. The most hated task in the industry. When it fills, haul it out the back door.'},
+  b:{name:'DOOR',line:'The back door. The dumpster breathes out there. Dump the trash, take a breath.'}
+};
+function tile(tx,ty){if(ty<0||ty>=MAP.length||tx<0||tx>=32)return '#';return MAP[ty][tx];}
+function solid(ch){return ch!=='.';}
+
+// ---- NPCs (all solid - you cannot ghost through) ----
+function mkNPC(name,sprite,lines,pts){
+  return {name:name,sprite:sprite,lines:lines,path:pts,wp:0,pause:0,x:pts[0].x,y:pts[0].y,dir:'down',step:0};
+}
+var NPCS=[];
+function setupNPCs(){
+  var lineY=MAP_Y+2*16+8;    // row 2: the hallway in front of the hot line
+  var chefY=MAP_Y+4*16+8;    // row 4: the hallway in front of the chop/fryer/grill 2
+  var pitY=MAP_Y+6*16+8;    // row 6: the pit hallway
+  var cook=mkNPC('CHEF',SP_CHEF,role==='helper'?[
+    'Cook: You are my helper tonight. Ribs flipped, rice stirred - I count on you.',
+    'Cook: My scrapes fill the tub at the chop, but the pit has that covered. You stay on the fire.',
+    'Cook: Keep moving, hot side. The rail does not wait.'
+  ]:[
+    'Cook: I chop chicken and ribs here, then work the fryer and the second grill.',
+    'Cook: Your counts keep me sane. When the warmer runs dry, I hear about it.',
+    'Cook: Keep moving, pit. The rail does not wait.'
+  ],[
+    {x:10*16+8,y:chefY},{x:15*16+8,y:chefY},{x:20*16+8,y:chefY},{x:15*16+8,y:chefY}
+  ]);
+  var akm=mkNPC('AKM',SP_AKM,role==='helper'?[
+    'AKM: Cover the hot side tonight. Flip the ribs, stir the rice, answer the cook\'s calls.',
+    'AKM: The grill bars drain in real time - even while you stir rice. Choose fast.',
+    'AKM: Tub, trash, basins - all pit work tonight. The dishwasher is solid; trust him.',
+    'AKM: When the cook barks a call, answer it. Miss one and the rail feels it.',
+    'AKM: I keep to the side and supervise - I chip in for the cook from the rail. But I take smoke breaks. Plan around me.'
+  ]:[
+    'AKM: Welcome to the pit! Face the DISH basin and press SPACE.',
+    'AKM: Four stages: WASH, RINSE, SANITIZE, DRY. Then put away at the rack.',
+    'AKM: When you pull from the sanitizer, wait for the GREEN zone. Too early, re-dip.',
+    'AKM: That tub by the chop? The hot side scrapes into it. Change it before it overflows.',
+    'AKM: Grease pans need double scrubs. Double points. Do not fear the grease.',
+    'AKM: See the trash can? When it fills, bag it and haul it out the back door. Yes, you.',
+    'AKM: Rack 8 dishes before the clock runs out. Then the pit accepts you.'
+  ],role==='helper'
+    ?[{x:25*16+8,y:pitY}] // the AKM keeps to the side and supervises - no more ghosting through the stations
+    :[{x:2*16+8,y:pitY}]);
+  akm.ghost=true; // the AKM never blocks you - his route hugs the back of the line
+  if(role==='helper'){
+    // you ARE the helper tonight - so no helper NPC: instead the pit is covered
+    var dish=mkNPC('DISHWASHER',SP_DISH,[
+      'Dishwasher: I got the pit tonight. Tub, trash, basins - all mine. You hold the hot side down.',
+      'Dishwasher: See me walk to the chop? That is the tub run. I do not need to be asked.',
+      'Dishwasher: Racks are coming back clean - keep the pans out of my basin, ha.',
+      'Dishwasher: You flip, I scrub. Same race, different sides.'
+    ],[
+      {x:3*16+8,y:pitY},{x:6*16+8,y:pitY},{x:3*16+8,y:pitY},{x:6*16+8,y:pitY}
+    ]);
+    dish.duty='pit';
+    NPCS=[cook,dish,akm];
+  }else{
+    var helper=mkNPC('HELPER',SP_HELPER,[
+      'Cook Helper: Ribs flipped. Chicken counted. Rice stirred. Busy busy busy.',
+      'Cook Helper: Two red rice platters just came in - I am on it!',
+      'Cook Helper: The tub next to the chop fills fast. The line never stops.',
+      'Cook Helper: Watch yourself back here - it is tight, and I am fast.'
+    ],[
+      {x:5*16+8,y:lineY},{x:10*16+8,y:lineY},{x:15*16+8,y:lineY},{x:20*16+8,y:lineY},
+      {x:15*16+8,y:lineY},{x:10*16+8,y:lineY}
+    ]);
+    NPCS=[helper,cook,akm];
+  }
+}
+function updateNPCs(dt){
+  for(var i=0;i<NPCS.length;i++){
+    var n=NPCS[i];
+    if(n.path.length<2)continue; // static (AKM)
+    // the pit NPC is a perfect coworker: sees a filling tub and changes it himself
+    if(n.duty==='pit'&&role==='helper'&&scene==='play'){
+      if(!n.task&&tub>=4)n.task={phase:'toTub',x:5*16+8,y:MAP_Y+4*16+8}; // stand in the hallway in front of the tub
+      if(n.task){
+        if(n.task.phase==='changing'){
+          n.taskT-=dt;n.step+=dt;
+          if(n.taskT<=0){tub=0;tubAlert=false;toast('Dishwasher: Tub changed. Pit stays moving.',C.gry);beep(500,0.05);
+            n.task={phase:'toPit',x:3*16+8,y:MAP_Y+6*16+8};}
+          continue;
+        }
+        var tx=n.task.x-n.x,ty=n.task.y-n.y,td=Math.sqrt(tx*tx+ty*ty);
+        if(td<3){
+          if(n.task.phase==='toTub'){n.task={phase:'changing'};n.taskT=1.2;n.dir='up';continue;}
+          n.task=null;n.wp=0;n.pause=0.5;continue;
+        }
+        var tsp=32*dt;
+        n.x+=tx/td*tsp;n.y+=ty/td*tsp;
+        if(Math.abs(tx)>Math.abs(ty)){n.dir=tx<0?'left':'right';}
+        else{n.dir=ty<0?'up':'down';}
+        n.step+=dt;
+        continue;
+      }
+    }
+    if(n.pause>0){n.pause-=dt;n.step+=dt;continue;}
+    var t=n.path[n.wp];
+    var dx=t.x-n.x,dy=t.y-n.y;
+    var d=Math.sqrt(dx*dx+dy*dy);
+    if(d<3){n.wp=(n.wp+1)%n.path.length;n.pause=2+Math.random()*1.5;continue;}
+    var sp=32*dt;
+    n.x+=dx/d*sp;n.y+=dy/d*sp;
+    if(dx<0)n.dir='left';else if(dx>0)n.dir='right';
+    n.step+=dt;
+  }
+}
+
+// ---- game state ----
+var scene='menu';
+var role='dish',HS=null,mode='shift'; // shift = real night, train = training run (mistakes forgiven)
+// ---- career progression: start in the pit, earn the hot side ----
+var CAREER_WINS=2; // clean dish shifts needed to unlock COOK HELPER
+function loadCareer(){
+  try{var s=(typeof localStorage==='undefined')?null:localStorage.getItem('kq_career');
+    if(s){var c=JSON.parse(s);if(c&&c.rank)return c;}}catch(e){}
+  return {rank:'dish',wins:0,trainedDish:false,trainedHelper:false};
+}
+function saveCareer(){try{if(typeof localStorage!=='undefined')localStorage.setItem('kq_career',JSON.stringify(career));}catch(e){}}
+var career=loadCareer();
+var P={x:14*16+8,y:MAP_Y+4*16+8,dir:'down'};
+var timeLeft=120,score=0,dishes=0,DISH_GOAL=8;
+var tub=2,TUB_CAP=6,dumpT=9,tubAlert=false;
+var trash=1,TRASH_CAP=4,carrying=false,trashWarn=0,trashAlert=false,foodCarry=null; // foodCarry: helper hauling ribs/birds to the chop
+var miss=0,MISS_MAX=3,sinceDish=0,trashFullT=0,behindWarn=false,akmHelpT=9; // dish-role strikes: tub, trash, pace; akmHelpT: the AKM quietly saves tub/trash
+var dlg={txt:'',t:0};
+var overlay=null;
+var toastQ=[];
+function say(txt,dur){toast(txt,C.wht,dur||4.5);}
+function toast(txt,c,dur){toastQ=[{txt:txt,c:c||C.gold,life:dur||2.8}];} // persistent bottom box: newest message wins
+var IDLE_LINE={dish:'The pit never sleeps. Face the DISH basin and press SPACE.',helper:'Ribs and rice. Flip, stir, breathe. Face a station and press SPACE.'};
+// ---- the rush: night-by-night escalation + the triage brain ----
+var NIGHT=1; // every real shift you survive, the kitchen gets faster (Friday- rush pressure, FNAF clock style)
+function pace(base){return Math.max(base*0.45,base/(1+0.14*(NIGHT-1)));} // demand intervals shrink each night
+function slow(base){return Math.min(base*2,base*(1+0.18*(NIGHT-1)));} // safety nets thin out each night
+function nextTask(){ // one glance at the message box = where to run next, worst first
+  if(role==='dish'){
+    if(carrying)return 'NEXT: HAUL THE TRASH OUT THE BACK DOOR!';
+    if(trash>=TRASH_CAP)return 'NEXT: TRASH IS FULL - LIFT THE BAG AT THE PIT (SPACE), RUN IT OUT THE DOOR';
+    if(tub>=TUB_CAP)return 'NEXT: TUB IS FULL - CHANGE IT AT THE CHOP (SPACE)';
+    if(sinceDish>32)return 'NEXT: THE PIT IS BACKING UP - WASH A DISH AT THE BASIN (SPACE)';
+    if(tub>=TUB_CAP-2)return 'NEXT: TUB AT '+Math.floor(tub/TUB_CAP*100)+'% - CHANGE IT AT THE CHOP SOON';
+    return 'NEXT: WASH THE NEXT DISH AT THE BASIN (SPACE) - KEEP THE PIT MOVING';
+  }
+  var H=HS;if(!H)return '...';
+  var i;
+  if(foodCarry){var dest='THE WARMER';for(i=0;i<H.calls.length;i++)if(H.calls[i].type==='HAUL'&&H.calls[i].item===foodCarry.type)dest='THE CHOP';
+    return 'NEXT: RUN '+foodCarry.n+' '+foodCarry.type+' TO '+dest+' (SPACE AT THE STATION)';}
+  if(!H.akmGrill){ // AKM owns the ribs on your first real shift - do not nag you about his job
+    var worst=Infinity,anyOn=false;for(i=0;i<6;i++){if(H.slabs[i].empty)continue;anyOn=true;if(!H.slabs[i].cooked&&H.slabs[i].t<worst)worst=H.slabs[i].t;}
+    if(!anyOn)return 'NEXT: GRILL IS EMPTY - HOLD SPACE AT THE GRILL TO LOAD RIBS';
+    if(worst<H.flipT*0.22)return 'NEXT: GRILL - A RIB SLAB IS ABOUT TO BURN. FLIP IT (SPACE)';
+    var dry=-1;for(i=0;i<6;i++)if(H.slabs[i].cooked)dry=i;
+    if(dry>=0)return 'NEXT: GRILL - PULL THE COOKED RIBS (S), RUN THEM TO THE WARMER';
+  }
+  for(i=0;i<3;i++){var p=H.pots[i];if(p.grace>0)return 'NEXT: STIR THE '+p.n+' POT NOW (S)!';}
+  for(i=0;i<H.skewers.length;i++){var sk=H.skewers[i];if(sk.has&&sk.ready)return 'NEXT: ROTIS - PULL THE READY BIRDS (S), RUN THEM TO THE WARMER';}
+  var mc=null;for(i=0;i<H.calls.length;i++)if(!mc||H.calls[i].timer<mc.timer)mc=H.calls[i];
+  if(mc&&mc.timer<6)return 'NEXT: '+mc.label;
+  if(mc)return 'NEXT UP: '+mc.label+' ('+Math.ceil(mc.timer)+'s)';
+  var idleS=0;for(i=0;i<H.skewers.length;i++)if(!H.skewers[i].has)idleS++;
+  if(idleS>4)return 'NEXT: ROTIS IS EMPTY - LOAD A SKEWER (SPACE)';
+  return 'NEXT: KEEP THE ROTIS AND RICE MOVING - WATCH THE CALL BOARD UP TOP';
+}
+function drawMsgBox(dt){
+  var m=toastQ[0];
+  if(m){m.life-=dt;if(m.life<=0)toastQ.length=0;}
+  var txt=(m?m.txt:(overlay?'...':nextTask()))||'';
+  // persistent parchment text box at the bottom
+  R(4,292,504,42,'#e8dcc0');
+  R(4,292,504,2,'#6a5a3a');R(4,332,504,2,'#6a5a3a');R(4,292,2,42,'#6a5a3a');R(506,292,2,42,'#6a5a3a');
+  var words=txt.split(' '),line='',y=301;
+  for(var i=0;i<words.length;i++){
+    if((line+words[i]).length>58){T(line,14,y,'#3a2a1a',9);y+=11;line='';}
+    line+=words[i]+' ';
+  }
+  T(line,14,y,'#3a2a1a',9);
+}
+function newDish(){
+  var need=3+Math.floor(Math.random()*2);
+  var grease=Math.random()<0.25;if(grease)need*=2;
+  return {phase:'wash',scrub:0,need:need,grease:grease,sanT:0,dryN:0,clog:false,clogT:0,clogHold:0,clogged:Math.random()<0.2};
+}
+// ---- cook helper shift state: ribs on the grill, rice on the burners ----
+function initHelper(){
+  HS={flipT:14,slabs:[],
+    pots:[{n:'RED',v:8,cooking:0,stir:0,grace:0},{n:'JAMAICAN',v:8,cooking:0,stir:0,grace:0},{n:'WHITE',v:6,cooking:0,stir:0,grace:0}],
+    potSel:0,skewers:[{has:false,t:0,ready:false,grace:0,warn:false},{has:false,t:0,ready:false,grace:0,warn:false},{has:false,t:0,ready:false,grace:0,warn:false},{has:false,t:0,ready:false,grace:0,warn:false},{has:false,t:0,ready:false,grace:0,warn:false},{has:false,t:0,ready:false,grace:0,warn:false},{has:false,t:0,ready:false,grace:0,warn:false},{has:false,t:0,ready:false,grace:0,warn:false}],
+    warmer:6,warmRibs:0,calls:[],callT:7,demandT:12,orders:[],orderT:16,PAR:9,mistakes:0,MISTAKE_MAX:12,
+    akm:{away:false,t:10+Math.random()*10},train:(mode==='train'),
+    akmGrill:(mode==='shift'&&(career.helperShifts||0)===1),tutSeen:{}}; // first REAL helper shift: AKM takes the grill
+  for(var i=0;i<6;i++)HS.slabs.push({t:0,c:0,cooked:false,empty:true,need:3+Math.floor(Math.random()*3),w:false}); // grill starts COLD: hold SPACE to load raw ribs, 3-5 flips each (the grill decides)
+}
+function newCall(){
+  var H=HS,roll=Math.random();
+  if(roll<0.3){ // chicken: load skewers at the rotis
+    H.calls.push({type:'DROP',label:'COOK: LOAD 3 SKEWERS!',need:3,done:0,timer:16,total:16});
+    toast('COOK: LOAD 3 SKEWERS AT THE ROTIS! (3 BIRDS EACH)',C.org);
+  }else if(roll<0.55){ // rice: scoop a specific pot
+    var i=Math.floor(Math.random()*3);
+    H.calls.push({type:'RICE',pot:i,label:'COOK: PLATE 2 '+H.pots[i].n+' RICE!',need:2,done:0,timer:16,total:16});
+    toast('COOK: PLATE 2 '+H.pots[i].n+' RICE!',C.org);
+  }else if(roll<0.7){ // the cook wants a running count from the warmer
+    H.calls.push({type:'COUNT',label:'COOK: WHAT IS MY COUNT?',need:1,done:0,timer:22,total:22});
+    toast('COOK: WHAT IS MY COUNT? CHECK THE WARMER!',C.org);
+  }else{ // run cooked meat to the chop
+    var item=Math.random()<0.5?'RIBS':'BIRDS',n=1+Math.floor(Math.random()*3);
+    H.calls.push({type:'HAUL',item:item,label:'COOK: RUN '+n+' '+item+' TO THE CHOP!',need:n,done:0,timer:25,total:25});
+    toast('COOK: RUN '+n+' '+item+' TO THE CHOP!',C.org);
+  }
+  beep(700,0.08);beep(900,0.1);
+  var lc=H.calls[H.calls.length-1];if(lc){lc.timer=lc.total=pace(lc.total||16);} // every night, the cook shouts faster
+}
+function callCount(){ // calling the running count at the warmer
+  var H=HS,cooking=0;
+  for(var i=0;i<H.skewers.length;i++)if(H.skewers[i].has)cooking+=3;
+  var pending=0;
+  for(i=0;i<H.orders.length;i++)pending+=H.orders[i].birds;
+  var txt='COUNT: '+H.warmer+' COOKED, '+cooking+' COOKING';
+  var low=(H.warmer+cooking)<(pending+H.PAR);
+  if(low)txt+=' - LOW! ORDERS NEED '+pending+', PAR '+H.PAR+'! LOAD SKEWERS!';
+  if(!callProgress('COUNT')){score+=5;toast(txt+' +5',C.gold);}
+  else toast(txt,C.gold);
+  beep(500,0.06);
+}
+function newOrder(){ // platters pull birds and ribs off the two sides of the warmer
+  var H=HS;
+  var birds=2+Math.floor(Math.random()*4); // chicken platter + dine-in/take-out
+  var ribs=Math.random()<0.4?1+Math.floor(Math.random()*2):0; // some tickets want ribs too
+  H.orders.push({birds:birds,ribs:ribs,timer:22,total:22,
+    label:'ORDER: '+birds+' BIRDS'+(ribs?' + '+ribs+' RIBS':'')});
+  toast('ORDER IN: '+birds+' BIRDS'+(ribs?' + '+ribs+' RIBS':'')+'!',C.org);
+  beep(620,0.07);beep(500,0.09);
+  if(H.warmer+3*countCooking(H)<birds||H.warmRibs<ribs)toast('COOK: We do not have that! Get cooking NOW!',C.red);
+}
+function countCooking(H){var c=0;for(var i=0;i<H.skewers.length;i++)if(H.skewers[i].has)c++;return c;}
+function stirPot(p){ // helper: stir resets the interval, bonus if done in the grace window
+  if(p.cooking<=0&&p.grace<=0)return toast('NOTHING COOKING - STIR WHILE IT COOKS',C.gry);
+  var inGrace=p.grace>0;
+  p.stir=0;p.grace=0;score+=inGrace?4:2;sfxTick();
+  toast(inGrace?'GOOD STIR! +4':'STIRRED +2',C.grn);
+}
+function addMistake(w,reason){ // weighted mistakes: bird 3 (worst), rib 2, rice 1 - pile up and you are sent home
+  var H=HS;
+  if(H.train){toast(reason+' - TRAINING: forgiven. Learn it here, not on the line.',C.gry);return;} // no weights, no firing on a training run
+  H.mistakes+=w;
+  if(H.mistakes>=H.MISTAKE_MAX){
+    toast(reason+' - TOO MANY MISTAKES!',C.red);sfxBad();
+    endShift(false,true);END.mistakes=H.mistakes;
+  }else if(H.mistakes>=H.MISTAKE_MAX-3&&!H.mkWarn){
+    H.mkWarn=true;toast(reason+' - AKM: You are on thin ice. One big mistake and you are DONE!',C.red);sfxBad();
+  }else toast(reason,C.red);
+}
+function akmSim(dt){ // the AKM: your trainer on a training run, the cook's extra hands on a real night
+  var H=HS,a=H.akm;
+  if(a.away){a.t-=dt; // smoke break: gone from the floor
+    if(a.t<=0){a.away=false;a.t=12+Math.random()*12;
+      toast('AKM: Back from the smoke break. I have eyes on the rail.',C.grn);beep(600,0.05);}
+  }else{
+    a.t-=dt;
+    if(a.t<=0){
+      if(!H.train&&!H.akmGrill&&Math.random()<0.28){ // real shift only: he vanishes without warning - but never on your first shift, he has the ribs
+        a.away=true;a.t=8+Math.random()*7;
+        toast('AKM: Stepping out for a smoke - the cook\'s side is short-handed.',C.org);beep(300,0.1,'sawtooth');
+      }else{akmAssist(H);a.t=H.train?8+Math.random()*6:12+Math.random()*10;}
+    }
+  }
+  for(var ai=0;ai<NPCS.length;ai++)if(NPCS[ai].name==='AKM')NPCS[ai].away=a.away; // gone = not drawn, not solid, no talk
+}
+function akmAssist(H){ // training: he covers the hot side and teaches. real shift: he supervises from the side and helps the cook
+  if(H.train){
+    var mi=-1;
+    for(var i=1;i<6;i++){if(H.slabs[i].empty)continue;if(mi<0||H.slabs[i].t<H.slabs[mi].t)mi=i;}
+    if(mi<0){ // cold grill in training: the AKM shows you how to load it
+      H.slabs[0].empty=false;H.slabs[0].t=H.flipT;H.slabs[0].c=0;H.slabs[0].need=3+Math.floor(Math.random()*3);
+      toast('AKM: Raw ribs on - HOLD SPACE to load them yourself. Now watch the flips.',C.grn);beep(650,0.06);return;}
+    if(H.slabs[mi].t<=6&&!H.slabs[mi].cooked){H.slabs[mi].t=H.flipT;H.slabs[mi].w=false;H.slabs[mi].c++;
+      if(H.slabs[mi].c>=H.slabs[mi].need){H.slabs[mi].cooked=true;H.slabs[mi].t=10;}
+      toast('AKM: See that bar? I flipped it in time. Now you.',C.grn);beep(650,0.06);return;}
+    for(var j=0;j<3;j++){var p=H.pots[j];
+      if(p.grace>0){p.stir=0;p.grace=0;
+        toast('AKM: Stirred the '+p.n+' pot - that grace window is your friend.',C.grn);beep(650,0.06);return;}}
+    for(var k=0;k<H.skewers.length;k++){var sk=H.skewers[k];
+      if(sk.has&&sk.ready&&sk.grace<=5){sk.has=false;sk.ready=false;sk.grace=0;H.warmer+=3;
+        toast('AKM: Pulled that skewer before it burnt. 3 birds to the warmer.',C.grn);beep(650,0.06);return;}}
+    toast('AKM: Watch my hands - flip, stir, pull. Then the real shift.',C.gry);
+    return;
+  }
+  // real night: he supervises from the side and helps the cook by rotation - no more walking through stations
+  H.akm.k=((H.akm.k||0)+1)%3;
+  if(H.akm.k===0){ // cook's second grill - keeps ribs coming
+    H.warmRibs++;
+    toast('AKM: Ribs off the second grill - one to the rib side.',C.gry);beep(500,0.05);
+  }else if(H.akm.k===1){ // fryer - drops baskets
+    H.warmer+=3;
+    toast('AKM: Basket up at the fryer - 3 birds to the warmer.',C.gry);beep(500,0.05);
+  }else{ // the chop - chips in on haul calls, else preps ribs
+    var hc=-1;for(var hj=0;hj<H.calls.length;hj++)if(H.calls[hj].type==='HAUL'&&H.calls[hj].done<H.calls[hj].need)hc=hj;
+    if(hc>=0){H.calls[hc].done++;
+      if(H.calls[hc].done>=H.calls[hc].need){H.calls.splice(hc,1);score+=20;toast('AKM: Ran one to the chop for the cook. CALLOUT DONE +20',C.gry);beep(500,0.05);}
+      else toast('AKM: I ran one to the chop for the cook. ('+H.calls[hc].done+'/'+H.calls[hc].need+')',C.gry);
+    }else{H.warmRibs++;
+      toast('AKM: Cut ribs at the chop - one to the rib side.',C.gry);beep(500,0.05);}
+  }
+}
+function updateHelperSim(dt){
+  var H=HS;
+  if(TUT.length&&(120-timeLeft)>=TUT[0].at){say(TUT.shift().m,8);beep(520,0.05);} // the AKM's day-one walkthrough
+  akmSim(dt);
+  // ribs: live-fire drain; after 3-5 flips a slab is COOKED and must be pulled before it dries out
+  for(var i=0;i<6;i++){var s=H.slabs[i];
+    if(s.empty)continue; // an empty slot just sits there until YOU load raw ribs on it
+    s.t-=dt;
+    if(!s.cooked){
+      if(s.t<H.flipT*0.25&&!s.w&&s.t>0){ // almost burnt: warn loudly, once per slab
+        s.w=true;toast('A RIB SLAB IS ALMOST BURNT - FLIP IT AT THE GRILL!',C.red);beep(220,0.2,'sawtooth');beep(180,0.25,'sawtooth');
+      }
+    }else if(s.t<3&&!s.w&&s.t>0){
+      s.w=true;toast('COOKED RIB DRYING OUT - PULL IT AT THE GRILL!',C.red);beep(220,0.2,'sawtooth');
+    }
+    if(s.t<=-2.5){score-=30;s.empty=true;s.t=0;s.w=false;s.c=0;s.cooked=false;addMistake(2,'SLAB BURNT! -30');sfxBad();}
+    if(H.akmGrill&&!s.cooked&&s.t<=3&&s.t>-2.5){ // first real shift: AKM has the ribs - he flips before anything burns
+      s.t=H.flipT;s.w=false;s.c++;
+      if(s.c>=s.need){s.cooked=true;s.t=10;toast('AKM: Flipped your ribs through - COOKED. I have the grill tonight.',C.gry);}
+      else toast('AKM: Flipped that slab for you - stay on the rotis and rice.',C.gry);
+      beep(600,0.05);}
+    else if(H.akmGrill&&s.cooked&&s.t<=4){ // and he pulls them before they dry
+      s.empty=true;s.c=0;s.w=false;H.warmRibs++;
+      toast('AKM: Ribs pulled to the rib side - keep your birds moving.',C.gry);beep(600,0.05);}
+  }
+  H.akmLoadT=(H.akmLoadT===undefined?12:H.akmLoadT)-dt; // AKM keeps the grill stocked on your supervised shift
+  if(H.akmGrill&&H.akmLoadT<=0){
+    var loaded=false;
+    for(var ali=0;ali<6&&!loaded;ali++){var as=H.slabs[ali];
+      if(as.empty){as.empty=false;as.cooked=false;as.c=0;as.w=false;as.t=H.flipT;as.need=3+Math.floor(Math.random()*3);
+        loaded=true;toast('AKM: Fresh ribs on the grill.',C.gry);beep(600,0.05);}}
+    H.akmLoadT=loaded?(9+Math.random()*6):5; // grill already full? check again soon
+  }
+  // rice: stir in intervals - the bar fills slowly, then a grace window before it ruins
+  for(i=0;i<3;i++){var p=H.pots[i];
+    if(p.cooking>0||p.grace>0){
+      p.cooking=Math.max(0,p.cooking-dt);
+      if(p.grace>0){
+        p.grace-=dt;
+        if(p.grace<=0){p.cooking=0;p.stir=0;p.grace=0;p.v=0;score-=15;addMistake(1,p.n+' POT RUINED! NOT STIRRED! -15');sfxBad();continue;}
+      }else{
+        p.stir+=dt/8;
+        if(p.stir>=1){p.stir=1;p.grace=4;beep(240,0.15,'sawtooth');toast('STIR THE '+p.n+' POT NOW! (S)',C.red);}
+      }
+      // pot finishes only when cooked AND settled (no pending stir window)
+      if(p.cooking<=0&&p.grace<=0&&p.stir<1){p.v=10;p.cooking=0;p.stir=0;score+=10;toast(p.n+' POT READY +10',C.grn);sfxGood();}
+    }
+  }
+  // orders: the count is what you cook against - platters plus dine-in and take-out
+  H.orderT-=dt;
+  if(H.orderT<=0&&H.orders.length<2){H.orderT=pace(14)+Math.random()*pace(10);newOrder();}
+  for(i=H.orders.length-1;i>=0;i--){var od=H.orders[i];
+    od.timer-=dt;
+    if(od.timer<=0){
+      H.orders.splice(i,1);
+      var haveB=H.warmer>=od.birds,haveR=H.warmRibs>=od.ribs;
+      if(haveB&&haveR){ // full platter goes out
+        H.warmer-=od.birds;H.warmRibs-=od.ribs;score+=15;
+        toast('ORDER OUT: '+od.birds+' BIRDS'+(od.ribs?' + '+od.ribs+' RIBS':'')+' +15',C.grn);sfxGood();
+      }else if(haveB||haveR){ // it went out short - the chop plate is wrong
+        if(haveB)H.warmer-=od.birds;else H.warmRibs-=od.ribs;
+        score-=10;addMistake(1,'ORDER WRONG: '+(haveB?od.ribs+' RIBS':od.birds+' BIRDS')+' MISSING! -10');sfxBad();
+      }else{score-=15;toast('ORDER MISSED: NOTHING ON THE WARMER -15',C.red);sfxBad();}
+    }
+  }
+  // the rail pulls all shift long - rice runs down, birds and ribs leave the warmer
+  H.demandT-=dt;
+  if(H.demandT<=0){
+    H.demandT=pace(10)+Math.random()*pace(8);
+    var rr2=Math.random();
+    if(H.warmRibs>0&&rr2<0.25){H.warmRibs--;toast('The rail pulled a rib off the rib side.',C.gry);}
+    else if(H.warmer>=3&&rr2<0.6){H.warmer-=3;toast('The rail pulled 3 birds off the warmer.',C.gry);}
+    else{
+      var rp=H.pots[Math.floor(Math.random()*3)];
+      if(rp.v>0&&!rp.cooking){rp.v=Math.max(0,rp.v-2);toast('The rail pulled 2 '+rp.n+' rice.',C.gry);}
+    }
+  }
+  // rotisserie: skewers cook, then sit READY on the skewer - pull them (S) or they burn
+  for(i=0;i<H.skewers.length;i++){var k=H.skewers[i];
+    if(k.has&&!k.ready){k.t-=dt;
+      if(k.t<=0){k.ready=true;k.grace=8;k.warn=false;beep(760,0.08);toast('SKEWER READY - PULL IT (S AT THE ROTIS) BEFORE IT BURNS!',C.grn);}}
+    else if(k.has&&k.ready){
+      k.grace-=dt;
+      if(k.grace<=4&&!k.warn){k.warn=true;toast('BIRDS DRYING ON THE SKEWER - PULL THEM NOW!',C.red);beep(220,0.2,'sawtooth');}
+      if(k.grace<=0){k.has=false;k.ready=false;k.grace=0;score-=40;addMistake(3,'3 BIRDS BURNT ON THE SKEWER! -40');sfxBad();}
+    }}
+  // the cook's call system: chicken drops and rice plates
+  H.callT-=dt;
+  if(H.callT<=0&&H.calls.length<2){H.callT=pace(10)+Math.random()*pace(7);newCall();}
+  for(i=H.calls.length-1;i>=0;i--){var c=H.calls[i];
+    c.timer-=dt;
+    if(c.timer<=0){H.calls.splice(i,1);score-=25;toast('MISSED: '+c.label+' -25',C.red);sfxBad();}}
+}
+function callProgress(type,potIdx){ // count action progress toward an active call
+  var H=HS;
+  for(var i=0;i<H.calls.length;i++){var c=H.calls[i];
+    if(c.type===type&&(type!=='RICE'||c.pot===potIdx)){
+      c.done++;
+      if(c.done>=c.need){H.calls.splice(i,1);score+=20;toast('CALLOUT DONE +20',C.grn);sfxGood();}
+      else toast(c.label+' ('+c.done+'/'+c.need+')',C.gold);
+      return true;
+    }
+  }
+  return false;
+}
+
+// ---- drawing ----
+function drawMap(){
+  var tx,ty,ch;
+  for(ty=0;ty<MAP.length;ty++)for(tx=0;tx<32;tx++){
+    ch=tile(tx,ty);
+    var x=tx*16,y=MAP_Y+ty*16;
+    if(ch==='.'){R(x,y,16,16,((tx+ty)%2===0)?'#141428':'#0f0f23');continue;}
+    R(x,y,16,16,'#3a3a55');R(x,y,16,3,'#4a4a66');R(x,y,16,1,'#2a2a40');
+    if(ch==='g'){spr(SP_RIB,x,y+5,1);}
+    else if(ch==='r'){spr(SP_CHICK,x+2,y+3,1);spr(SP_CHICK,x+6,y+3,1);}
+    else if(ch==='w'){R(x+1,y+1,14,13,'#242448');spr(SP_CHICK,x+4,y+4,1);}
+    else if(ch==='i'){spr(SP_POT,x+1,y+4,1);}
+    else if(ch==='p'){spr(SP_PAN,x,y+5,1);}
+    else if(ch==='h'){blit('knife',x+2,y-8);R(x+2,y+6,12,7,'#8a6a4a');spr(SP_CHICK,x+5,y+7,1);} // CHOP: knife counter sprite + board with a bird
+    else if(ch==='f'){R(x+1,y+2,14,12,'#1a1a2e');R(x+3,y+4,10,8,C.gold);R(x+5,y+6,6,4,'#22223a');}
+    else if(ch==='k'){blit('stove',x+2,y-8);spr(SP_STEAK,x+2,y+3,1);} // GRILL 2: real stove sprite + steak on the burner
+    else if(ch==='a'){ // salad bar: cold counter with greens
+      R(x+1,y+1,14,13,'#1a3a24');R(x+3,y+3,10,10,'#2a5a3a');
+      R(x+4,y+4,8,3,C.grn);R(x+5,y+8,6,3,'#a8d060');R(x+6,y+2,4,2,'#e8dcc0');
+    }
+    else if(ch==='q'){ // fridge: real sprite rising above the tile, cold shadow beneath
+      blit('fridge',x+2,y-8);R(x+2,y+14,12,2,'#22304a');
+    }
+    else if(ch==='u'){ // drink fountain: base with three drinks
+      R(x+1,y+3,14,13,'#3a3a55');R(x+2,y+4,12,11,'#222244');
+      R(x+3,y+6,3,6,'#c05040');R(x+7,y+6,3,6,'#fe9c4d');R(x+11,y+6,3,6,'#587ccc');
+      R(x+2,y+1,12,3,'#8b8ba7');
+    }
+    else if(ch==='d'){blit('sink',x+2,y-8);R(x+4,y+4,6,4,'rgba(154,180,216,0.45)');} // DISH: real sink sprite + wash water
+    else if(ch==='t'){
+      R(x+1,y+1,14,14,'#5a4a2a');
+      var fh=Math.round(12*Math.min(1,tub/TUB_CAP));
+      R(x+2,y+14-2-fh,12,fh,tub>=TUB_CAP?C.red:'#7a6a4a');
+      R(x+1,y+1,14,2,'#6a5a3a');
+    }
+    else if(ch==='c'){
+      R(x+2,y+4,12,12,'#3a3a55');
+      var p2=Math.min(6,dishes);
+      for(var i=0;i<p2;i++)R(x+3,y+4-i*2,10,2,'#dfe6ef');
+    }
+    else if(ch==='x'){
+      R(x+1,y+3,14,13,'#4a4a5a');R(x+2,y+5,12,9,'#2a2a3a');
+      var tf=Math.round(9*Math.min(1,trash/TRASH_CAP));
+      R(x+3,y+13-3-tf,10,tf,trash>=TRASH_CAP?C.red:'#6a6a7a');
+      R(x+1,y+2,14,2,'#5a5a6a');
+    }
+    else if(ch==='b'){R(x+1,y+1,14,14,'#6a4a2a');R(x+3,y+3,10,10,'#7a5a3a');R(x+11,y+8,2,3,'#22223a');}
+    else if(ch==='#'){blit('ct',x+2,y-8);} // steel counters: real wood-counter sprite
+  }
+  T('WALK-IN',36,24,C.gry,8);
+  T('DOOR',8*16-4,MAP_Y+8*16+13,C.gry,8);
+  // station name labels: spaced along the hallway rows, above the back rows / below the pit row
+  var c;
+  for(var lr=1;lr<=3;lr+=2){ // rows 1 and 3: labels above
+    var row=MAP[lr];
+    for(c=0;c<32;c++){
+      var chr=row[c];
+      if(STATION_INFO[chr]&&chr!=='.'&&chr!=='#'){
+        T(STATION_INFO[chr].name,c*16-4,MAP_Y+lr*16-9,C.gry,8);
+      }
+    }
+  }
+  var row5=MAP[5];
+  for(c=0;c<32;c++){
+    var ch5=row5[c];
+    if(STATION_INFO[ch5]&&ch5!=='.'&&ch5!=='#'){
+      T(STATION_INFO[ch5].name,c*16-2,MAP_Y+5*16+15,C.gry,8);
+    }
+  }
+}
+function drawNPC(n){
+  var bob=Math.floor(n.step*4)%2;
+  var yo=n.pause>0?(bob?2:0):0;
+  if(n.dir==='left'){
+    ctx.save();ctx.translate(n.x+8,n.y-14+yo);ctx.scale(-1,1);spr(SP_COOK_S,0,0,2);ctx.restore();
+    return;
+  }
+  var s=n.sprite;
+  if(n.dir==='right')s=SP_COOK_S;
+  spr(s,n.x-8,n.y-14+yo,2);
+}
+function drawPlayer(){
+  var s=SP_COOK_D;
+  if(P.dir==='up')s=SP_COOK_U;
+  else if(P.dir==='left'){ctx.save();ctx.translate(P.x+8,0);ctx.scale(-1,1);spr(SP_COOK_S,0,P.y-14,2);ctx.restore();return;}
+  else if(P.dir==='right')s=SP_COOK_S;
+  spr(s,P.x-8,P.y-14,2);
+  if(carrying){ // trash bag on the shoulder
+    R(P.x-13,P.y-11,7,9,'#5a4a2a');R(P.x-13,P.y-12,7,2,'#6a5a3a');R(P.x-11,P.y-14,3,2,'#6a5a3a');
+  }
+}
+function drawHud(){ // fixed status bar up top: row 1 = shift stats, row 2 = live station status chips
+  R(0,0,512,22,C.panel);R(0,22,512,2,C.line);
+  T(role==='dish'?'THE SHIFT - DISHWASHER':'THE SHIFT - COOK HELPER',4,3,C.gry);
+  if(role==='dish'){
+    T('RACKED '+dishes+'/'+DISH_GOAL,150,3,C.wht);
+    var mcol=miss>=MISS_MAX-1?C.red:C.gry;
+    T('MISS '+miss+'/'+MISS_MAX,230,3,mcol);
+  }
+  else{
+    T('SCORE '+Math.floor(score),150,3,C.wht);
+  }
+  var m=Math.floor(Math.max(0,timeLeft)/60),s=Math.floor(Math.max(0,timeLeft)%60);
+  T('TIME '+m+':'+(s<10?'0':'')+s,438,3,timeLeft<20?C.red:C.grn);
+  if(role==='dish'){
+    // tub gauge chip
+    R(4,12,104,9,C.drk);bar(5,14,102,5,Math.min(1,tub/TUB_CAP),tub>=TUB_CAP?C.red:'#7a6a4a',C.line);
+    T('TUB',7,13,tub>=TUB_CAP?C.red:C.gry,8);
+    // trash gauge chip
+    R(112,12,104,9,trashAlert?C.red:C.drk);bar(113,14,102,5,Math.min(1,trash/TRASH_CAP),trash>=TRASH_CAP?C.red:'#6a6a7a',C.line);
+    T('TRASH',115,13,trash>=TRASH_CAP?C.red:C.gry,8);
+    if(carrying)T('CARRYING BAG - TO THE DOOR',224,13,C.org,8);
+    else if(behindWarn)T('PIT FALLING BEHIND - RACK!',224,13,C.red,9);
+  }
+  else{
+    var H=HS,i;
+    // rib chip: always visible, color-matched to the burn state
+    var worst=Infinity,anyOn=false;
+    for(i=0;i<6;i++){if(H.slabs[i].empty)continue;anyOn=true;worst=Math.min(worst,H.slabs[i].t);}
+    var rcol=worst<0||worst<H.flipT*0.25?C.red:worst<H.flipT*0.5?C.org:C.grn;
+    if(!anyOn){R(4,12,104,9,C.drk);T('RIBS OFF - LOAD',10,13,C.gry,8);}
+    else{
+    R(4,12,104,9,worst<0?C.red:C.drk);
+    T(worst<0?'RIBS BURNING!':'RIBS '+Math.ceil(Math.max(0,worst))+'s',10,13,rcol,8);
+    if(worst>=0)bar(58,14,48,5,Math.max(0,worst/H.flipT),rcol,C.line);
+    }
+    // warmer chip: both sides of the two-compartment warmer
+    R(112,12,84,9,C.drk);
+    T('WARM '+H.warmer+'B/'+H.warmRibs+'R',114,13,(H.warmer<H.PAR||H.warmRibs===0)?C.org:C.grn,8);
+    // hands full of food for a chop run
+    if(foodCarry){var dest='WARMER';for(var fc=0;fc<HS.calls.length;fc++)if(HS.calls[fc].type==='HAUL'&&HS.calls[fc].item===foodCarry.type)dest='CHOP';
+      var lbl='CARRY '+foodCarry.n+' '+foodCarry.type+' > WARMER';
+      if(dest==='CHOP')lbl='RUN '+foodCarry.n+' '+foodCarry.type+' TO CHOP';
+      R(198,12,lbl.length*5+8,9,C.org);T(lbl,201,13,'#111120',8);}
+    // active call countdown chips (the shout itself lands in the bottom text bar)
+    var cx=300;
+    for(i=0;i<H.calls.length&&cx<410;i++){
+      var c=H.calls[i];
+      R(cx,12,86,9,c.timer<5?C.red:C.drk);
+      var cbase=c.type==='HAUL'?c.item:c.type;
+      T(cbase+(c.type==='RICE'?' '+H.pots[c.pot].n:'')+' '+c.done+'/'+c.need,cx+3,13,c.timer<5?C.wht:C.gold,8);
+      bar(cx+58,14,26,5,Math.max(0,c.timer/c.total),C.org,C.line);
+      cx+=90;
+    }
+    if(H.calls.length>0&&cx<=410&&H.calls.length>Math.ceil((410-300)/90))T('+'+(H.calls.length-2),cx+2,13,C.gold,8);
+    // order chips, right side
+    var ox=508;
+    for(i=H.orders.length-1;i>=0;i--){
+      var o=H.orders[i],urgent=o.timer<6||H.warmer<o.birds||H.warmRibs<o.ribs;
+      ox-=76;
+      R(ox,12,76,9,urgent?C.red:C.drk);
+      T('ORD '+o.birds+'B'+(o.ribs?'+'+o.ribs+'R':''),ox+3,13,urgent?C.wht:C.gold,8);
+      bar(ox+42,14,32,5,Math.max(0,o.timer/o.total),urgent?C.wht:C.org,C.line);
+    }
+  }
+}
+function drawDlg(){ /* replaced by drawMsgBox */ }
+
+// ---- dish overlay (playable vertical slice) ----
+function openDish(){
+  overlay=newDish();
+  if(overlay.grease)say('A grease pan. Double scrubs, double points.',3);
+}
+function updateOverlay(dt){
+  var o=overlay;
+  if(o.kind==='grill'){
+    if(just['s']){ // pull ALL cooked slabs into your hands - one trip carries the whole batch
+      var H=HS,co=0;
+      for(var i=0;i<6;i++)if(H.slabs[i].cooked)co++;
+      if(foodCarry)toast('HANDS FULL - DROP IT AT THE WARMER FIRST!',C.org);
+      else if(co===0)toast('NOTHING COOKED YET - SPACE FLIPS, S PULLS',C.gry);
+      else{for(var i2=0;i2<6;i2++){var s2=H.slabs[i2];if(s2.cooked){s2.empty=true;s2.t=0;s2.c=0;}}
+        foodCarry={type:'RIBS',n:co};sfxTick();
+        toast(co+' COOKED RIB'+(co>1?'S':'')+' IN HAND - RUN THEM TO THE WARMER!',C.org);o.loadHold=0;}
+    }
+    if(just[' ']){ // SPACE: pull cooked ribs if any are ready, else flip - one key does the whole grill
+      var H=HS,min=-1,co=0;
+      for(var i=0;i<6;i++){if(H.slabs[i].empty)continue;if(H.slabs[i].cooked)co++;else if(min<0||H.slabs[i].t<H.slabs[min].t)min=i;}
+      if(co>0){ // cooked ribs waiting: SPACE pulls them, same as S
+        if(foodCarry)toast('HANDS FULL - DROP IT AT THE WARMER FIRST!',C.org);
+        else{for(var i3=0;i3<6;i3++){var s3=H.slabs[i3];if(s3.cooked){s3.empty=true;s3.t=0;s3.c=0;}}
+          foodCarry={type:'RIBS',n:co};sfxTick();o.loadHold=0;
+          toast(co+' COOKED RIB'+(co>1?'S':'')+' IN HAND - RUN THEM TO THE WARMER!',C.org);}
+      }else{
+      if(min>=0&&H.slabs[min].t<=H.flipT*0.85){var fs2=H.slabs[min];fs2.t=H.flipT;fs2.w=false;fs2.c++;score+=3;sfxTick();o.loadHold=0;
+        if(fs2.c>=fs2.need){fs2.cooked=true;fs2.t=10;toast('RIB SLAB COOKED ('+fs2.need+' FLIPS) - PULL IT (S), RUN TO THE WARMER +3',C.grn);}
+        else toast('RIB FLIPPED +3 ('+fs2.c+'/'+fs2.need+')',C.grn);}
+      else if(min>=0)toast('NOT READY TO FLIP YET - watch the bars',C.gry);
+      else toast('GRILL IS EMPTY - HOLD SPACE TO LOAD RAW RIBS',C.gry);
+      }
+    }
+    { // press and HOLD SPACE to load raw ribs - this grill does not load itself
+      var H=HS,emp=-1;
+      for(var le=0;le<6;le++)if(H.slabs[le].empty){emp=le;break;}
+      if(emp>=0&&down[' ']){
+        o.loadHold=(o.loadHold||0)+dt;
+        if(o.loadHold>=0.9){var es=H.slabs[emp];es.empty=false;es.cooked=false;es.c=0;es.w=false;es.t=H.flipT;es.need=3+Math.floor(Math.random()*3);
+          o.loadHold=0;score+=2;sfxTick();toast('RAW RIBS ON THE GRILL +2 - '+es.need+' FLIPS TO COOK',C.grn);}
+      }else if(!down[' '])o.loadHold=0;
+    }
+    if(just['enter']){overlay=null;}
+    return;
+  }
+  if(o.kind==='rice'){
+    var H2=HS,p=H2.pots[H2.potSel];
+    if(just['arrowup']||just['arrowdown']){H2.potSel=(H2.potSel+(just['arrowup']?2:1))%3;sfxTick();}
+    if((p.cooking>0||p.grace>0)&&down['s']){ // press and HOLD to stir - a real stir is elbow grease, not a tap
+      p.stirHold=(p.stirHold||0)+dt;
+      if(p.stirHold>=0.8){p.stirHold=0;stirPot(p);}
+    }else p.stirHold=0;
+    if(just['n']){
+      if(p.v===0&&p.cooking<=0){p.cooking=12;p.stir=0;p.grace=0;sfxTick();toast('NEW '+p.n+' POT ON',C.org);}
+      else toast('POT IS NOT EMPTY',C.gry);
+    }
+    if(just[' ']){
+      if(p.v>0){
+        var rc=-1; // is the cook waiting on a specific rice right now?
+        for(var rj=0;rj<H2.calls.length;rj++)if(H2.calls[rj].type==='RICE')rc=H2.calls[rj].pot;
+        p.v--;
+        if(rc>=0&&rc!==H2.potSel){score-=5;addMistake(1,'WRONG RICE! THE COOK WANTED '+H2.pots[rc].n+' -5');sfxBad();}
+        else{score+=4;sfxGood();
+          if(!callProgress('RICE',H2.potSel))toast(p.n+' SCOOPED +4',C.grn);}
+      }
+      else if(p.cooking>0)toast('STILL COOKING...',C.gry);
+      else toast('EMPTY POT - PRESS N',C.org);
+    }
+    if(just['enter']){overlay=null;}
+    return;
+  }
+  if(o.kind==='warmer'){
+    if(just[' '])callCount();
+    if(just['r']||just['b']){ // grab cooked meat off the warmer for a chop run
+      var t2=just['r']?'RIBS':'BIRDS';
+      if(foodCarry)toast('HANDS FULL - DELIVER AT THE CHOP FIRST!',C.org);
+      else{
+        var cc=null;
+        for(var wj=0;wj<HS.calls.length;wj++)if(HS.calls[wj].type==='HAUL'&&HS.calls[wj].item===t2)cc=HS.calls[wj];
+        if(!cc)toast('THE COOK DID NOT ASK FOR '+t2+' RIGHT NOW',C.gry);
+        else{
+          var stock=t2==='RIBS'?HS.warmRibs:HS.warmer;
+          var gn=Math.min(cc.need-cc.done,stock);
+          if(gn<=0)toast('NOT ENOUGH '+t2+' IN THE WARMER',C.red);
+          else{if(t2==='RIBS')HS.warmRibs-=gn;else HS.warmer-=gn;foodCarry={type:t2,n:gn};sfxTick();toast(gn+' '+t2+' IN HAND - RUN TO THE CHOP!',C.org);}
+        }
+      }
+    }
+    if(just['enter']){overlay=null;}
+    return;
+  }
+  if(o.kind==='rotis'){
+    var H3=HS;
+    if(just['s']){ // pull every READY skewer INTO YOUR HANDS - run the birds to the warmer on foot
+      if(foodCarry)toast('HANDS FULL - DROP IT AT THE WARMER FIRST!',C.org);
+      else{var readyN=0;
+        for(var i3=0;i3<H3.skewers.length;i3++){var sk2=H3.skewers[i3];
+          if(sk2.has&&sk2.ready){sk2.has=false;sk2.ready=false;sk2.grace=0;sk2.warn=false;readyN++;}}
+        if(readyN>0){foodCarry={type:'BIRDS',n:readyN*3};sfxTick();
+          toast(readyN*3+' BIRDS IN HAND - RUN THEM TO THE WARMER!',C.org);}
+        else toast('NOTHING READY - BIRDS STILL COOKING',C.gry);}
+    }
+    if(just[' ']){
+      var loaded=false;
+      for(var i2=0;i2<H3.skewers.length;i2++){var sk=H3.skewers[i2];
+        if(!sk.has){sk.has=true;sk.t=14;loaded=true;break;}}
+      if(loaded){sfxTick();
+        if(!callProgress('DROP'))toast('SKEWER LOADED',C.wht);}
+      else toast('ROTIS IS FULL - BIRDS STILL COOKING',C.gry);
+    }
+    if(just['enter']){overlay=null;}
+    return;
+  }
+  if(o.phase==='wash'){
+    if(o.clogged&&!o.clog&&o.scrub>=3){o.clog=true;o.clogT=3.5;sfxBad();}
+    if(o.clog){
+      o.clogT-=dt;
+      if(down['d']||down[' ']){ // press and HOLD: the clog fights back, it takes steady work
+        o.clogHold+=dt;
+        if(o.clogHold>=1.2){o.clog=false;o.clogged=false;o.clogHold=0;toast('DRAIN CLEARED!',C.grn);sfxGood();}
+      }else o.clogHold=Math.max(0,o.clogHold-dt*2); // let go and your progress slides back
+      if(o.clogT<=0){o.clog=false;o.clogHold=0;o.scrub=Math.max(0,o.scrub-5);toast('DRAIN BACKED UP!',C.red);sfxBad();}
+    }
+    if(just[' ']&&!o.clog){o.scrub++;sfxTick();
+      if(o.scrub>=o.need){o.phase='rinse';beep(880,0.06);}}
+  }else if(o.phase==='rinse'){
+    if(just['r']||just[' ']){o.phase='sanitize';o.sanT=0;sfxTick();}
+  }else if(o.phase==='sanitize'){
+    o.sanT+=dt;
+    if(just['s']||just[' ']){
+      if(o.sanT>=1.5){o.phase='dry';o.dryN=0;sfxGood();}
+      else{score-=5;toast('NOT SANITIZED - RE-DIP! -5',C.red);sfxBad();o.sanT=0;}
+    }
+  }else if(o.phase==='dry'){
+    if(just[' ']){o.dryN++;sfxTick();
+      if(o.dryN>=2){o.phase='putaway';beep(980,0.08);}}
+  }else if(o.phase==='putaway'){
+    if(just['enter']||just[' ']){
+      dishes++;score+=o.grease?50:25;sfxGood();
+      sinceDish=0;behindWarn=false;
+      trash=Math.min(TRASH_CAP+2,trash+1);
+      overlay=null;
+      if(dishes>=DISH_GOAL)endShift(true);
+    }
+  }
+}
+function drawOverlay(){
+  if(overlay.kind==='grill'){drawGrillOverlay();return;}
+  if(overlay.kind==='rice'){drawRiceOverlay();return;}
+  if(overlay.kind==='rotis'){drawRotisOverlay();return;}
+  if(overlay.kind==='warmer'){drawWarmerOverlay();return;}
+  ctx.globalAlpha=0.75;R(0,0,512,352,C.drk);ctx.globalAlpha=1;
+  R(88,36,336,252,C.panel);R(88,36,336,2,C.blu);R(88,286,336,2,C.blu);
+  T('THE DISH PIT',176,44,C.blu,13);
+  var o=overlay;
+  var stages=['WASH','RINSE','SANI','DRY','AWAY'];
+  var idx={wash:0,rinse:1,sanitize:2,dry:3,putaway:4}[o.phase];
+  for(var i=0;i<5;i++){
+    var x=98+i*65,cur=i===idx,done=i<idx;
+    R(x,60,58,22,cur?C.gold:(done?C.grn:'#222244'));
+    T(stages[i],x+10,66,cur?C.drk:(done?C.drk:C.gry),9);
+  }
+  spr(SP_PLATE,206,104,8);
+  if(o.grease&&o.phase==='wash')R(200,98,120,60,'rgba(74,74,40,0.5)');
+  if(o.phase==='wash'){
+    var dirty=1-(o.scrub/Math.max(1,o.need));
+    for(var i2=0;i2<8;i2++){if(dirty>i2/8)R(216+i2*13,116,9,9,'#3a2a10');}
+  }
+  if(o.phase==='rinse'){ctx.fillStyle='rgba(90,120,190,0.4)';ctx.fillRect(206,104,112,48);}
+  if(o.phase==='sanitize'){ctx.fillStyle='rgba(42,120,90,0.45)';ctx.fillRect(206,104,112,48);}
+  if(o.phase==='putaway'){ctx.fillStyle='rgba(255,255,255,0.7)';ctx.fillRect(206,104,112,48);}
+  if(o.grease)T('GREASE PAN (+25)',200,168,C.org,9);
+  var y=186;
+  if(o.phase==='wash'){T('WASH: MASH SPACE',120,y,C.wht,10);bar(120,y+16,270,10,o.scrub/o.need,C.grn);
+    if(o.clog){T('DRAIN CLOG! HOLD SPACE ('+Math.ceil(o.clogT)+'s)',120,y+30,C.red,10);bar(120,y+44,270,8,(o.clogHold||0)/1.2,C.org);}}
+  else if(o.phase==='rinse')T('RINSE: PRESS R',120,y,C.blu,10);
+  else if(o.phase==='sanitize'){T('SANITIZE: pull (S) in the green',120,y,C.wht,10);
+    bar(120,y+16,270,10,o.sanT/2,C.gry);
+    R(120+270*0.75,y+16,270*0.25,10,C.grn);
+    T('green zone ->',120,y+30,C.grn,9);}
+  else if(o.phase==='dry'){T('DRY: MASH SPACE',120,y,C.wht,10);bar(120,y+16,270,10,o.dryN/2,C.org);}
+  else if(o.phase==='putaway')T('PUT IT AWAY: PRESS ENTER',120,y,C.gold,10);
+  T('SPACE wash/dry  HOLD SPACE to unclog  R rinse  S pull  ENTER away',80,268,C.gry,8);
+}
+
+function drawGrillOverlay(){
+  ctx.globalAlpha=0.75;R(0,0,512,352,C.drk);ctx.globalAlpha=1;
+  R(88,52,336,220,C.panel);R(88,52,336,2,C.red);R(88,270,336,2,C.red);
+  T('RIB GRILL - LIVE FIRE',168,60,C.org,13);
+  var H=HS;
+  for(var i=0;i<6;i++){
+    var y=82+i*30;
+    spr(SP_RIB,106,y+2,1);
+    var sl=H.slabs[i];
+    if(sl.empty){
+      T('OFF',150,y+3,C.gry,9);
+      T('HOLD SPACE - LOAD RAW RIBS',200,y+3,C.gry,8);
+      if(overlay.loadHold>0)bar(150,y+16,190,5,Math.min(1,overlay.loadHold/0.9),C.grn);
+      continue;
+    }
+    if(sl.cooked){
+      bar(150,y+3,190,10,Math.max(0,sl.t/10),sl.t<3?C.red:C.gold);
+      T('DONE - PULL (SPACE/S)',282,y+2,C.gold,8);
+    }else{
+      var pct=Math.max(0,Math.min(1,sl.t/H.flipT));
+      bar(150,y+3,190,10,pct,pct<0.2?C.red:pct<0.45?C.org:C.grn);
+      if(pct<0.2)T('!',352,y+1,C.red,11);
+    }
+    T(Math.max(0,Math.ceil(sl.t))+'s',370,y+3,C.gry,9);
+  }
+  T('SPACE: PULL COOKED RIBS OR FLIP. HOLD SPACE: LOAD RAW RIBS.',96,236,C.wht,9);
+  T('A slab needs 3-5 flips. Cooked ribs go to the warmer rib side.',96,248,C.gry,8);
+  T('ENTER: BACK TO THE FLOOR - bars keep draining!',112,258,C.gry,8);
+}
+function drawRotisOverlay(){
+  ctx.globalAlpha=0.75;R(0,0,512,352,C.drk);ctx.globalAlpha=1;
+  R(88,52,336,220,C.panel);R(88,52,336,2,C.org);R(88,270,336,2,C.org);
+  T('ROTISSERIE',206,60,C.org,13);
+  T('BIRD SIDE: '+HS.warmer+'    RIB SIDE: '+HS.warmRibs,168,78,C.gold,10);
+  for(var i=0;i<8;i++){
+    var k=HS.skewers[i],x=104+i*40;
+    if(k.has&&k.ready){
+      spr(SP_CHICK,x+4,116,1);
+      T('READY',x,128,C.grn,8);
+      bar(x,150,24,8,Math.max(0,k.grace/8),k.grace<4?C.red:C.grn);
+      T(Math.ceil(k.grace)+'s!',x+2,162,C.red,8);
+    }
+    else if(k.has){spr(SP_CHICK,x+4,116,1);bar(x,150,24,8,Math.max(0,k.t/14),C.org);T(Math.ceil(k.t)+'s',x+2,162,C.gry,8);}
+    else{T('empty',x,128,C.gry,8);}
+  }
+  T('SPACE: LOAD A SKEWER (3 BIRDS)   S: PULL READY SKEWERS',116,196,C.wht,9);
+  T('Ready skewers WAIT 8s, then the birds BURN (-40). Pull them!',124,214,C.gry,8);
+  T('Answer the cook: LOAD 3 SKEWERS = 3 loads (3 birds each)',126,230,C.gry,8);
+  T('ENTER: BACK TO THE FLOOR',172,250,C.grn,9);
+}
+function drawWarmerOverlay(){
+  ctx.globalAlpha=0.75;R(0,0,512,352,C.drk);ctx.globalAlpha=1;
+  R(88,52,336,220,C.panel);R(88,52,336,2,C.gold);R(88,270,336,2,C.gold);
+  T('THE WARMER',186,60,C.gold,13);
+  var cooking=0;
+  for(var i=0;i<HS.skewers.length;i++)if(HS.skewers[i].has)cooking+=3;
+  var pending=0;
+  for(i=0;i<HS.orders.length;i++)pending+=HS.orders[i].birds;
+  T(HS.warmer+' COOKED BIRDS WAITING',166,80,C.wht,10);
+  var shown=Math.min(10,HS.warmer);
+  for(i=0;i<shown;i++){spr(SP_CHICK,120+(i%5)*18,102+Math.floor(i/5)*14,1);}
+  T('RIB SIDE: '+HS.warmRibs+' COOKED RIBS',158,128,C.wry||C.wht,10);
+  var shownR=Math.min(8,HS.warmRibs);
+  for(i=0;i<shownR;i++){spr(SP_RIB,120+i*14,142,1);}
+  T(cooking+' STILL COOKING ON SKEWERS',160,160,C.org,9);
+  T('PAR: '+HS.PAR+' BIRDS. HAVE: '+HS.warmer+'. ORDERS WAITING: '+pending+' BIRDS',110,172,C.wht,9);
+  var want=pending+HS.PAR-HS.warmer-cooking;
+  var drops=Math.max(0,Math.ceil(want/3));
+  T(drops>0?('RECOMMENDED: LOAD '+drops+' SKEWER'+(drops>1?'S':'')+' ('+want+' BIRDS NEEDED)'):'YOU ARE AT PAR - HOLD THE LINE',110,186,drops>0?C.org:C.grn,9);
+  T('SPACE: CALL THE COUNT   R: TAKE RIBS   B: TAKE BIRDS',134,202,C.wht,9);
+  T('R/B grab meat for a CHOP RUN - deliver it at the chop.',122,216,C.gry,8);
+  T('ENTER: BACK TO THE FLOOR',172,250,C.grn,9);
+}
+
+function drawOrders(){ /* folded into the top status bar */ }
+function drawGrillStatus(){ /* folded into the top status bar */ }
+function drawCalls(){ /* cook call-outs now land in the bottom text bar; timers live in the top status bar */ }
+function drawRiceOverlay(){
+  ctx.globalAlpha=0.75;R(0,0,512,352,C.drk);ctx.globalAlpha=1;
+  R(88,52,336,220,C.panel);R(88,52,336,2,C.grn);R(88,270,336,2,C.grn);
+  T('RICE POTS',206,60,C.grn,13);
+  var H=HS;
+  for(var i=0;i<3;i++){
+    var p=H.pots[i],sel=H.potSel===i,y=86+i*46;
+    if(sel)R(104,y-6,304,40,'#242448');
+    T(p.n,116,y,sel?C.gold:C.wht,11);
+    spr(SP_POT,182,y-4,1);
+    if(p.cooking>0){
+      if(p.grace>0){
+        T('STIR NOW! (S)',254,y-1,C.red,9);bar(332,y+1,38,9,p.grace/4,C.red);
+        T(Math.ceil(p.grace)+'s!',376,y-1,C.red,9);
+      }else{
+        T('STIR',254,y-1,C.gry,9);bar(290,y+1,26,9,p.stir,C.org);
+      }
+      T('COOKING '+Math.ceil(p.cooking)+'s',254,y+14,C.gold,9);
+    }else{
+      bar(254,y+1,100,9,p.v/10,C.grn);
+      if(p.v===0)T('EMPTY - N',254,y+13,C.red,9);
+      else T('READY - SPACE SCOOP',254,y+13,C.grn,9);
+    }
+  }
+  T('v^ POT   S STIR (WHILE COOKING)   N NEW POT   SPACE SCOOP',100,246,C.wht,8);
+  T('ENTER: BACK TO THE FLOOR - pots keep cooking!',118,258,C.gry,8);
+}
+
+// ---- interactions ----
+function facingTile(){
+  var dx=P.dir==='left'?-1:P.dir==='right'?1:0;
+  var dy=P.dir==='up'?-1:P.dir==='down'?1:0;
+  return tile(Math.floor((P.x+dx*12)/16),Math.floor((P.y-MAP_Y+dy*12)/16));
+}
+function interact(){
+  var dx=P.dir==='left'?-12:P.dir==='right'?12:0;
+  var dy=P.dir==='up'?-12:P.dir==='down'?12:0;
+  var fx=P.x+dx,fy=P.y+dy;
+  for(var i=0;i<NPCS.length;i++){
+    var n=NPCS[i];
+    if(n.away)continue; // AKM is out for a smoke - no talk
+    if(n.ghost&&n.y<96)continue; // AKM works behind the line - he never intercepts your station work
+    if(Math.abs(fx-n.x)<12&&Math.abs(fy-n.y)<12){
+      say(n.name+': '+(n.lines.length?n.lines[(typeof n.li==='undefined'?0:n.li)%n.lines.length]:'...'),5);
+      n.li=(typeof n.li==='undefined'?0:n.li)+1;
+      return;
+    }
+  }
+  var ch=facingTile();
+  if(carrying){
+    if(ch==='b'){carrying=false;score+=25;trashWarn=0;trashAlert=false;trashFullT=0;sfxGood();toast('TRASH DUMPED +25! Take a breath.',C.grn);}
+    else toast('HANDS FULL OF TRASH! Take it out the BACK DOOR!',C.org);
+    return;
+  }
+  if(ch==='x'){
+    if(role==='helper'){say('The trash is pit work tonight. The dishwasher has it.',3.5);return;}
+    if(trash>=2){carrying=true;trash-=2;toast('Trash bag lifted. Slow walk to the back door.',C.org);}
+    else say('Not worth a trip yet. Let it fill.',3);
+    return;
+  }
+  if(ch==='d'){
+    if(role==='dish')openDish();
+    else say('Not your pit tonight. The dishwasher has it. Stay on the hot side.',3.5);
+    return;
+  }
+  if(ch==='t'){
+    if(role==='helper'){say('Tub runs are pit work. The dishwasher handles it - watch him go.',3.5);return;}
+    if(tub>=3){score+=15;tub=0;tubAlert=false;
+      if(role==='dish')trash=Math.min(TRASH_CAP+2,trash+1);
+      toast('TUB CHANGED +15',C.grn);sfxGood();}
+    else say('Not full enough to change yet. Let the hot side work.',3);
+    return;
+  }
+  if(role==='helper'&&foodCarry&&ch==='w'){ // carried meat lands at the WARMER - it ALWAYS takes ribs, hands are never stuck
+    var Hw=HS;
+    if(foodCarry.type==='RIBS'){
+      Hw.warmRibs+=foodCarry.n;score+=8*foodCarry.n;sfxGood();
+      toast(foodCarry.n+' RIB'+(foodCarry.n>1?'S':'')+' TO THE RIB SIDE +'+(8*foodCarry.n),C.grn);
+    }else{
+      Hw.warmer+=foodCarry.n;score+=3*foodCarry.n;sfxGood();
+      toast(foodCarry.n+' BIRDS TO THE WARMER +'+(3*foodCarry.n),C.grn);
+    }
+    foodCarry=null;
+    return;
+  }
+  if(role==='helper'&&foodCarry&&(ch==='g'||ch==='i'||ch==='r')){ // hands full: no station work until you drop the meat
+    toast('HANDS FULL OF '+foodCarry.type+' - DROP THEM AT THE WARMER FIRST!',C.org);
+    return;
+  }
+  if(role==='helper'&&ch==='g'){overlay={kind:'grill'};if(HS.train&&!HS.tutSeen.g){HS.tutSeen.g=1;say('AKM: SPACE flips the LOWEST bar - two flips = cooked. S pulls cooked ribs.',7);}return;}
+  if(role==='helper'&&ch==='i'){overlay={kind:'rice'};if(HS.train&&!HS.tutSeen.i){HS.tutSeen.i=1;say('AKM: N starts a pot, S stirs a full bar, SPACE scoops the pot the cook CALLED.',7);}return;}
+  if(role==='helper'&&ch==='r'){overlay={kind:'rotis'};if(HS.train&&!HS.tutSeen.r){HS.tutSeen.r=1;say('AKM: SPACE loads a skewer. S pulls READY birds into your hands - run them to the warmer.',7);}return;}
+  if(role==='helper'&&ch==='w'){overlay={kind:'warmer'};if(HS.train&&!HS.tutSeen.w){HS.tutSeen.w=1;say('AKM: SPACE answers the cook\'s call. R grabs ribs for a chop run.',7);}return;}
+  if(role==='helper'&&ch==='h'&&foodCarry){ // deliver a chop run: right item = call progress, wrong item = mistake
+    var H4=HS,cc2=null;
+    for(var dj=0;dj<H4.calls.length;dj++)if(H4.calls[dj].type==='HAUL'&&H4.calls[dj].item===foodCarry.type)cc2=H4.calls[dj];
+    if(!cc2){score-=5;addMistake(1,'WRONG RUN - THE COOK DID NOT ASK FOR '+foodCarry.type+' -5');foodCarry=null;}
+    else{
+      cc2.done+=foodCarry.n;foodCarry=null;
+      if(cc2.done>=cc2.need){
+        for(var dj2=0;dj2<H4.calls.length;dj2++)if(H4.calls[dj2]===cc2){H4.calls.splice(dj2,1);break;}
+        score+=20;toast('CALLOUT DONE +20 - THE CHOP IS HAPPY',C.grn);sfxGood();
+      }else toast(cc2.label+' ('+cc2.done+'/'+cc2.need+')',C.gold);
+    }
+    return;
+  }
+  if(STATION_INFO[ch]&&STATION_INFO[ch].line)say(STATION_INFO[ch].name+': '+STATION_INFO[ch].line,6);
+  else if(ch==='#')say('Steel counters. The walk-in hums.',3);
+}
+
+// ---- movement + collisions (NPCs are solid) ----
+function solidAt(px,py){
+  var tx=Math.floor(px/16),ty=Math.floor((py-MAP_Y)/16);
+  if(ty<0)return true;
+  return solid(tile(tx,ty));
+}
+function slideMove(dx,dy){ // blocked by a body? slip around them instead of waiting for them to move
+  if(tryMove(P.x+dx,P.y+dy))return true;
+  if(dx&&tryMove(P.x+dx,P.y))return true; // keep the push on one axis, slip along the other
+  if(dy&&tryMove(P.x,P.y+dy))return true;
+  for(var i=0;i<NPCS.length;i++){var n=NPCS[i];if(n.ghost||n.away)continue;
+    if(Math.abs(P.x+dx-n.x)<14&&Math.abs(P.y+dy-n.y)<14){ // a person blocks the path: sidestep past them
+      if(tryMove(P.x+dx+14,P.y+dy)||tryMove(P.x+dx-14,P.y+dy))return true;
+      return false;
+    }}
+  return false;
+}
+function tryMove(nx,ny){
+  var ok=true;
+  if(solidAt(nx-5,ny-5)||solidAt(nx+5,ny-5)||solidAt(nx-5,ny+5)||solidAt(nx+5,ny+5))ok=false;
+  for(var i=0;i<NPCS.length;i++){
+    var n=NPCS[i];
+    if(n.ghost)continue; // the AKM is a floater - you brush straight past him
+    if(Math.abs(nx-n.x)<13&&Math.abs(ny-n.y)<13)ok=false;
+  }
+  if(ok){P.x=nx;P.y=ny;}
+  return ok;
+}
+function addMiss(reason){ // dish strikes add up: too many and the shift is over
+  if(mode==='train'){toast(reason+' - TRAINING: forgiven. Watch, learn, breathe.',C.gry);return;} // first-day training: no strikes
+  miss++;
+  if(miss>=MISS_MAX){
+    toast(reason+' - THE PIT DROWNED. GO HOME.',C.red);sfxBad();
+    endShift(false,true);END.miss=miss;
+  }else if(miss===MISS_MAX-1){
+    toast(reason+' - AKM: One more and your shift is DONE!',C.red);sfxBad();
+  }else toast(reason,C.red);
+}
+function updatePlay(dt){
+  if(just['q']){quitShift();return;} // bail out from anywhere in the shift, even mid-overlay
+  if(overlay){
+    if(role==='helper'){updateHelperSim(dt);timeLeft-=dt;if(timeLeft<=0)endShift(false);}
+    updateOverlay(dt);return;
+  }
+  timeLeft-=dt;
+  updateNPCs(dt);
+  dumpT-=dt;
+  if(dumpT<=0){
+    dumpT=pace(6)+Math.random()*pace(6);
+    var n2=1+Math.floor(Math.random()*2);
+    tub+=n2;toast('HOT SIDE DUMPED A TUB! +'+n2,C.org);beep(240,0.12,'sawtooth');
+    if(role==='dish'&&Math.random()<0.5){trash=Math.min(TRASH_CAP+2,trash+1);toast('...and scraped a plate. TRASH +1',C.gry);}
+  }
+  if(tub>=TUB_CAP&&!tubAlert){tubAlert=true;sfxBad();toast(role==='dish'?'TUB FULL! CHANGE IT AT THE CHOP!':'The tub is filling - the dishwasher sees it.',role==='dish'?C.red:C.gry);}
+  if(role==='dish'&&tub>TUB_CAP+2){score-=10;sfxBad();tub=TUB_CAP-3;tubAlert=false;addMiss('MISSED TUB CHANGE! -10');}
+  // trash duty (dishwasher's shift only - the pit NPC covers it when you are on the hot side): grace, then the score bleeds
+  if(role==='dish'){
+    // the AKM keeps an eye on the pit: instant tub change / trash run when things get critical
+    akmHelpT-=dt;
+    if(akmHelpT<=0){
+      akmHelpT=slow(9)+Math.random()*slow(7);
+      if(tub>=TUB_CAP+1){tub=0;tubAlert=false;toast('AKM: Tub changed - I got it. Stay on your dishes.',C.grn);beep(520,0.05);}
+      else if(trashAlert&&trashFullT>=10){trash=0;carrying=false;trashAlert=false;trashWarn=0;trashFullT=0;toast('AKM: Ran the trash out - handled. Back to the pit.',C.grn);beep(520,0.05);}
+    }
+    if(trash>=TRASH_CAP&&!trashAlert){trashAlert=true;trashWarn=12;sfxBad();toast('TRASH FULL! Haul it out the back door!',C.red);}
+    if(trashAlert&&trash>=TRASH_CAP&&!carrying){
+      if(trashWarn>0)trashWarn-=dt;
+      else{score-=1*dt;trashFullT+=dt;
+        if(trashFullT>=25){trashFullT=0;addMiss('MISSED TRASH RUN!');}}
+    }
+    // the pit must keep moving: rack too slowly and it counts against you
+    sinceDish+=dt;
+    if(sinceDish>32&&!behindWarn){behindWarn=true;toast('AKM: The pit is falling behind - RACK SOMETHING!',C.org);beep(300,0.15,'sawtooth');}
+    if(sinceDish>45){sinceDish=25;behindWarn=false;addMiss('TOO SLOW - THE PIT IS BACKING UP!');}
+  }
+  var sp=(carrying?42:75)*dt;
+  if(down['arrowleft']||down['a']){P.dir='left';slideMove(-sp,0);walkTarget=null;}
+  else if(down['arrowright']||down['d']){P.dir='right';slideMove(sp,0);walkTarget=null;}
+  else if(down['arrowup']||down['w']){P.dir='up';slideMove(0,-sp);walkTarget=null;}
+  else if(down['arrowdown']||down['s']){P.dir='down';slideMove(0,sp);walkTarget=null;}
+  else if(walkTarget){ // pointer walking: step toward the tapped tile; keys always override
+    var wdx=walkTarget.x-P.x,wdy=walkTarget.y-P.y,wd=Math.sqrt(wdx*wdx+wdy*wdy);
+    var wthr=walkTarget.thr||14,moved=false;
+    if(wd>wthr){ // stations want a tight center; people you tapped need room to be talked to
+      if(Math.abs(wdx)>Math.abs(wdy)){if(tryMove(P.x+sp*Math.sign(wdx),P.y))moved=true;else if(tryMove(P.x,P.y+sp*Math.sign(wdy)))moved=true;}
+      else{if(tryMove(P.x,P.y+sp*Math.sign(wdy)))moved=true;else if(tryMove(P.x+sp*Math.sign(wdx),P.y))moved=true;}
+    }
+    if(wd<=wthr||!moved)walkStuck+=dt;else walkStuck=0;
+    if(wd<=wthr||walkStuck>0.45){ // arrived (or wedged): face the goal and work it
+      walkStuck=0;
+      if(walkFace)faceToward(walkFace.x,walkFace.y);
+      var work=walkThen;walkTarget=null;walkThen=null;walkFace=null;
+      if(work==='interact')interact();
+    }
+  }
+  if(just[' '])interact();
+  if(role==='helper')updateHelperSim(dt);
+  if(timeLeft<=0)endShift(false);
+}
+function drawPlay(dt){
+  drawPlayOrder(dt);
+}
+function drawPlayOrder(dt){
+  R(0,0,512,352,C.bg);
+  R(0,MAP_Y-3,512,MAP.length*16+6,C.drk); // frame behind map
+  drawMap();
+  for(var i=0;i<NPCS.length;i++){if(NPCS[i].away)continue;drawNPC(NPCS[i]);
+    var nm=NPCS[i].name,nc=nm==='AKM'?'#ffd541':nm==='CHEF'?'#ff9f9f':'#9ecfff'; // name tags: the AKM reads gold
+    T(nm,NPCS[i].x-nm.length*2.6,NPCS[i].y-27,nc,7);}
+  drawPlayer();
+  if(walkTarget&&!overlay){ // the tapped destination reads as a gold pip on the floor
+    R(walkTarget.x-3,walkTarget.y-3,6,6,C.gold);R(walkTarget.x-1,walkTarget.y-1,2,2,'#1a1a2e');
+  }
+  drawHud(); // status bar: rib/tub/trash warnings, call + order timers, all fixed at the top
+  if(!TOUCH){ // keyboard players get a visible quit chip too
+    R(104,182,68,20,C.panel);R(104,182,68,1,'#6a5a3a');R(104,201,68,1,'#6a5a3a');R(104,182,1,20,'#6a5a3a');R(171,182,1,20,'#6a5a3a');
+    T('QUIT (Q)',114,187,C.gry,9);
+  }
+  if(overlay)drawOverlay();
+  drawMsgBox(dt);
+}
+function quitShift(){ // abandon the shift: straight to the menu, no end screen, nothing counted
+  scene='menu';HS=null;END=null;overlay=null;foodCarry=null;toastQ.length=0;walkTarget=null;walkThen=null;walkFace=null;
+  beep(300,0.1);beep(220,0.12);
+}
+function endShift(early,fired){
+  scene='end';  END={dishes:dishes,early:early,fired:!!fired,score:Math.floor(score),train:(HS&&HS.train)||mode==='train',promoted:false};
+  if(!END.train&&role==='dish'){career.dishShifts=(career.dishShifts||0)+1;saveCareer();} // the rush dial ticks: every real shift survived cranks the pace
+  // career progression: clean (non-training, non-fired) dish shift that racks the goal AND scores 300+ counts toward the promotion
+  if(!END.fired&&!END.train&&role==='dish'&&dishes>=DISH_GOAL&&END.score>=300){
+    career.wins++;saveCareer();
+    if(career.rank==='dish'&&career.wins>=CAREER_WINS){career.rank='helper';saveCareer();END.promoted=true;}
+  }
+}
+var END=null;
+var TUT=[]; // helper training: the AKM's station-by-station walkthrough, dripped out over the shift
+
+// ---- menu / end ----
+function updateMenu(){
+  if(just['1']){role='dish';mode='shift';beep(600,0.05);}
+  if(just['2']){
+    if(career.rank==='helper'){role='helper';mode='shift';beep(660,0.05);}
+    else beep(160,0.12,'square'); // locked: two clean shifts in the pit first
+  }
+  if(just['u']){ // dev unlock: jump straight to the hot side for testing
+    if(career.rank!=='helper'){career.rank='helper';saveCareer();beep(880,0.08);beep(990,0.1);}
+    else beep(160,0.1,'square');
+  }
+  if(just['enter']){beep(740,0.08);startShift();}
+}
+function startShift(){
+  career=loadCareer(); // promotions persist between shifts
+  // first day on a new role = automatic training: mistakes forgiven while you learn
+  if(role==='dish'&&!career.trainedDish){mode='train';career.trainedDish=true;saveCareer();}
+  else if(role==='helper'&&!career.trainedHelper){mode='train';career.trainedHelper=true;saveCareer();}
+  else mode='shift'; // trained already: this is a real shift (menu selection also sets this)
+  NIGHT=(role==='helper'?(career.helperShifts||0):(career.dishShifts||0))+1; // the rush dial: every survived shift, the kitchen runs hotter
+  if(mode==='train')NIGHT=1;
+  setupNPCs();
+  P={x:14*16+8,y:MAP_Y+4*16+8,dir:'down'};
+  timeLeft=120;score=0;dishes=0;tub=2;dumpT=9;tubAlert=false;
+  trash=1;carrying=false;foodCarry=null;trashWarn=0;trashAlert=false;toastQ.length=0;
+  miss=0;sinceDish=0;trashFullT=0;behindWarn=false;akmHelpT=9;
+  overlay=null;scene='ready'; // breather screen first - nothing simulates until the player opts in
+  if(role==='helper'){
+    if(mode==='shift'){career.helperShifts=(career.helperShifts||0)+1;saveCareer();} // shift 1 after training = AKM rides the grill with you
+    initHelper();
+    if(mode==='shift'&&HS.akmGrill)toast('AKM: First real shift - I FLIP THE RIBS tonight. You run ROTIS and RICE.',C.gold);
+    if(mode==='train')TUT=[ // day one on the hot side: the AKM walks you station by station
+      {at:2,m:'AKM: Day one on the hot side, kid. Four stations - GRILL, ROTIS, RICE, WARMER.'},
+      {at:14,m:'AKM: GRILL - SPACE flips a slab when its bar runs low. Two flips and it is cooked.'},
+      {at:26,m:'AKM: Cooked ribs get PULLED - S at the grill, then walk them to the WARMER.'},
+      {at:38,m:'AKM: ROTIS - SPACE loads a skewer. When the birds read READY, S pulls them into your hands.'},
+      {at:50,m:'AKM: RICE - N starts a pot, S stirs when its bar fills, SPACE scoops the pot the cook CALLED for.'},
+      {at:62,m:'AKM: WARMER - SPACE answers the cook\'s call. R grabs ribs for a chop run - deliver at the CHOP.'},
+      {at:76,m:'AKM: Mistakes are forgiven today. Watch my hands - flip, stir, pull. Real shift next time.'}];
+    else TUT=[];
+  }else TUT=[];
+}
+function updateReady(){ // the pause before the fray: the kitchen waits, frozen
+  if(just[' ']||just['enter']){
+    scene='play';beep(740,0.08);
+    say(role==='helper'
+      ?(mode==='train'
+        ?'AKM: Walk with me - flip, stir, pull. Training wheels ON tonight; mistakes are forgiven.'
+        :'AKM: Cover the hot side tonight. Flip the ribs, stir the rice, answer the cook\'s calls. The pit crew handles the rest.')
+      :(mode==='train'
+        ?'AKM: First day in the pit. Wash, rack, breathe - I will jump on the tub and trash when they pile up. Mistakes forgiven.'
+        :NPCS[2].lines[0]),6);
+  }
+}
+function drawReady(){
+  drawPlay(0); // the frozen kitchen behind the briefing
+  var isT=mode==='train';
+  R(66,54,380,214,C.panel);R(66,54,380,3,C.gold);R(66,265,380,3,C.gold);
+  T(isT?(role==='helper'?'TRAINING - COOK HELPER':'TRAINING - THE PIT'):role==='helper'?'COOK HELPER - THE HOT SIDE':'DISHWASHER - THE PIT',104,66,isT?C.grn:C.gold,13);
+  T(isT?'learn the rhythm - mistakes forgiven':'SHIFT '+NIGHT+(NIGHT>=5?' - FULL RUSH':NIGHT===4?' - IT IS A ZOO':NIGHT===3?' - PICKING UP':NIGHT===2?' - WARMED UP':''),104,84,isT?C.gry:(NIGHT>=3?C.org:C.grn),10);
+  if(role==='helper'){
+    T('GRILL: SPACE flips - 2 flips = cooked',92,96,C.wht,9);
+    T('S pulls ALL cooked ribs INTO YOUR HANDS',92,112,C.wht,9);
+    T('Pulled meat is CARRIED - SPACE drops it at the WARMER',92,128,C.wht,9);
+    T('RICE: face the burners - S stirs in the grace window',92,144,C.wht,9);
+    T('ROTIS: SPACE loads - S takes ready birds in hand',92,160,C.wht,9);
+    T('Hands full = no station work. Deliver first, then flip.',92,176,C.wht,9);
+    T(isT?'Tonight mistakes are FORGIVEN - learn the rhythm here.':'Mistakes are WEIGHTED - pile up 12 and you are sent home.',84,182,isT?C.grn:C.red,9);
+    T(isT?'The AKM supervises from the side and steps in FOR you.':'The AKM supervises from the side and helps the COOK. The hot side is yours.',84,198,C.gry,9);
+  }else{
+    T('WASH > RINSE > SANITIZE > DRY - SPACE, R, S, SPACE',100,96,C.wht,9);
+    T('Rack 8 before the clock. Green zone on the sanitizer.',100,112,C.wht,9);
+    T('Tub, trash, pace: 3 strikes and you are done.',100,128,C.wht,9);
+    T('When the trash fills, bag it out the BACK DOOR.',100,144,C.wht,9);
+    T(isT?'TRAINING: the AKM jumps on the tub and trash for you. Mistakes forgiven.':'The AKM watches the tub and trash - but the pit is yours.',100,168,isT?C.grn:C.gry,9);
+    if(isT)T('When the rhythm feels right, tomorrow you fly solo.',100,184,C.grn,9);
+  }
+  T('TAKE A BREATH - THE CLOCK STARTS WHEN YOU PRESS SPACE',90,238,C.grn,10);
+}
+function drawMenu(){
+  R(0,0,512,352,C.bg);
+  for(var x=0;x<512;x+=32)for(var y=0;y<352;y+=32)if(((x+y)/32)%2===0)R(x,y,32,32,C.drk);
+  R(60,40,392,84,C.panel);R(60,40,392,3,C.gold);R(60,121,392,3,C.gold);
+  T('KITCHEN QUEST',150,54,C.gold,24);
+  T('OVERWORLD DEMO - CHOOSE YOUR SHIFT',168,88,C.wht,11);
+  // dev unlock chip: testing shortcut straight to the hot side (tap it or press U)
+  var ul=career.rank==='helper';
+  R(402,126,106,16,ul?C.drk:C.panel);R(402,126,106,1,'#6a5a3a');R(402,141,106,1,'#6a5a3a');
+  T(ul?'DEV: HOT SIDE UNLOCKED':'DEV: UNLOCK HOT SIDE',407,130,ul?C.grn:C.gry,8);
+  // role cards
+  var c1=role==='dish',c2=role==='helper',locked=career.rank!=='helper';
+  R(40,146,208,76,c1?C.gold:C.panel);R(42,148,204,72,c1?'#3a2a1a':C.drk);
+  T('1 - DISHWASHER',62,156,c1?'#ffd541':C.wht,11);
+  T('The pit. Wash, rinse,',56,176,c1?'#ffd541':C.gry,9);
+  T('sanitize, dry, rack 8.',56,190,c1?'#ffd541':C.gry,9);
+  R(264,146,208,76,c2?C.gold:C.panel);R(266,148,204,72,c2?'#3a2a1a':C.drk);
+  T('2 - COOK HELPER',286,156,c2?'#ffd541':locked?'#6a6a7a':C.wht,11);
+  T(locked?'LOCKED - 2 clean shifts in the pit.':'Flip ribs, stir rice,',280,176,locked?'#6a6a7a':(c2?'#ffd541':C.gry),9);
+  T(locked?'CLEAN 300+ SHIFT: '+career.wins+' / '+CAREER_WINS:'answer the cook\'s calls.',280,190,locked?'#6a6a7a':(c2?'#ffd541':C.gry),9);
+  T(TOUCH?'TAP A ROLE CARD - THEN TAP ANYWHERE TO CLOCK IN':'WASD/ARROWS: WALK     SPACE or CLICK: INTERACT     1/2: PICK SHIFT',60,248,C.wht,9);
+  T('Your first day on a new role is a TRAINING shift - mistakes forgiven.',84,262,career.trainedDish?C.gry:'#ffd541',9);
+  T('Clean pit shifts earn the hot side. Get promoted to unlock COOK HELPER.',84,276,C.gry,9);
+  T('PRESS ENTER TO CLOCK IN',172,312,C.grn,10);
+  T('TILE ART: BLUEROBIN2 - OPENGAMEART.ORG (CC-BY 3.0)',112,336,'#5a5a7a',7);
+}
+function updateEnd(){ // FNAF flow: the next shift starts NOW - the title screen is only a Q away
+  if(just['q']){scene='menu';beep(300,0.1);return;} // back to the title screen on purpose
+  if(just['enter']||just[' ']){
+    if(END.fired){scene='menu';return;} // sent home: pick your next move yourself
+    role=END.promoted?'helper':role; // promoted off the pit? straight to the hot side
+    startShift(); // the clock never stops in this kitchen - next shift briefing loads
+  }
+}
+function drawEnd(){
+  R(0,0,512,352,C.bg);
+  R(80,80,352,190,C.panel);R(80,80,352,2,END.fired?C.red:C.gold);R(80,268,352,2,END.fired?C.red:C.gold);
+  T(END.fired?'GO HOME - TOO MUCH FOOD WASTED':END.train?'TRAINING COMPLETE':END.early?'SHIFT COMPLETE - EARLY!':'SHIFT OVER',END.fired?104:150,96,END.fired?C.red:END.train?C.grn:C.gold,END.fired?12:14);
+  T(END.fired?'ENTER: BACK TO THE TITLE':'ENTER/TAP: START THE NEXT SHIFT      Q: TITLE SCREEN',END.fired?136:88,246,END.fired?C.gry:C.gold,10);
+  if(END.train){
+    T('Mistakes were forgiven tonight. The AKM saw you work.',116,130,C.wht,10);
+    T('SCORE: '+END.score+' (practice only)',168,150,C.wht,10);
+    if(role==='helper'){
+      T('That was your walkthrough - the NEXT shift is the real hot side.',100,180,C.gry,9);
+      T('On a real night the AKM helps the cook - you own the ribs, rice and spit.',92,198,C.gry,9);
+    }else{
+      T('Two clean pit shifts and the hot side opens up.',130,180,C.gry,9);
+      T('Clock in again - the AKM still has your back on tub and trash.',110,198,C.gry,9);
+    }
+  }
+  else if(END.fired){
+    if(role==='dish'){
+      T('STRIKES: '+END.miss+' / '+MISS_MAX+' (tub, trash, pace)',118,130,C.wht,10);
+      T('DISHES RACKED: '+END.dishes+' / '+DISH_GOAL,140,150,C.wht,10);
+      T('The GM walks out of the office: "The pit backed up on your watch."',104,180,C.gry,9);
+      T('Move faster tomorrow. The pit remembers everything.',122,198,C.gry,9);
+    }else{
+      T('FOOD WASTED: '+END.mistakes+' / '+HS.MISTAKE_MAX+' WEIGHTED (BIRD 3, RIB 2, RICE 1)',98,130,C.wht,9);
+      T('SCORE: '+END.score,150,150,C.wht,10);
+      T('The GM walks out of the office: "We do not burn food here."',110,180,C.gry,9);
+      T('Waste less tomorrow. The line gives second chances.',114,198,C.gry,9);
+    }
+  }
+  else if(role==='dish'){
+    T('DISHES RACKED: '+END.dishes+' / '+DISH_GOAL,140,130,C.wht,10);
+    T('SCORE: '+END.score,140,150,C.wht,10);
+    if(END.promoted){
+      T('CLEAN 300+ SHIFTS: '+career.wins+' / '+CAREER_WINS+' - PROMOTED!',112,168,'#ffd541',11);
+      T('The GM: "You outgrew the pit. The hot side is yours - pick 2."',100,186,C.wht,9);
+    }else{
+      T('CLEAN 300+ SHIFTS: '+career.wins+' / '+CAREER_WINS,148,168,C.wht,10);
+      T(END.early?'The pit accepts you. The GM walks by: "Where did you start?"':'The clock won. The pit remembers. Try again.',110,186,C.gry,9);
+    }
+  }else{
+    T('HOT SIDE SCORE: '+END.score,140,130,C.wht,10);
+    T('SCORE 60+ = the cook nods. 30+ = the AKM covers for you.',110,150,C.gry,9);
+    T(END.score>=60?'The cook nods: "You kept up tonight."':END.score>=30?'The AKM: "I covered some. You will get there."':'Slabs burnt. Pots ruined. Tomorrow is another day.',110,180,C.gry,9);
+  }
+  T('NEXT PROTOTYPES: the hot side stations, live on this map.',100,210,C.gry,9);
+  T('PRESS ENTER',200,336,C.grn,10);
+}
+
+// ---- pause: the shift freezes when the tab is hidden or the window loses focus ----
+var paused=false;
+if(typeof document!=='undefined'&&document.addEventListener)document.addEventListener('visibilitychange',function(){if(document.hidden)paused=true;});
+if(window.addEventListener){window.addEventListener('blur',function(){paused=true;});window.addEventListener('focus',function(){paused=false;});}
+
+// ---- main loop ----
+var last=performance.now();
+function loop(now){
+  var dt=Math.min(0.05,(now-last)/1000);last=now;
+  if(paused&&scene==='play'){ // nothing simulates, nothing burns, the clock holds
+    drawPlay(0);
+    R(150,140,212,48,C.panel);R(150,140,212,2,C.gold);R(150,186,212,2,C.gold);
+    T('PAUSED',216,146,C.gold,14);
+    T(TOUCH?'TAP ANY BUTTON TO RESUME':'PRESS ANY KEY TO RESUME',150,168,C.wht,9);
+    if(TOUCH)drawTouchUI();
+    for(var pk in just)just[pk]=false;
+    requestAnimationFrame(loop);
+    return;
+  }
+  if(scene==='menu'){updateMenu();drawMenu();}
+  else if(scene==='ready'){updateReady();drawReady();}
+  else if(scene==='play'){updatePlay(dt);if(scene==='play')drawPlay(dt);}
+  else if(scene==='end'){updateEnd();drawEnd();}
+  if(TOUCH&&scene==='play')drawTouchUI(); // virtual keys over the world on touch devices
+  for(var k in just)just[k]=false;
+  requestAnimationFrame(loop);
+}
+setupNPCs();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
